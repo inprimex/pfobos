@@ -200,4 +200,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 If you have questions, suggestions, or need help with this project, please:
 
 - Open an issue on GitHub
-- Contact the project maintainer at: [info@sunflowers.online]
+- Contact the project maintainer at: [https://sunflowers.online]
