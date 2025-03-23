@@ -1,7 +1,6 @@
-# pfobos
-Python wrapper for Fobos SDR
+# PFobos SDR Python Wrapper
 
-# Fobos SDR Python Wrapper
+<span style="color:red">The development in the starting point</span>
 
 A comprehensive Python wrapper for the Fobos Software Defined Radio (SDR) C library. This project allows Python developers to easily interface with Fobos SDR hardware for various radio applications including spectrum analysis and FM demodulation.
 
