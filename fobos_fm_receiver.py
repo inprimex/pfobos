@@ -18,37 +18,6 @@ import argparse
 from queue import Queue
 from fobos_wrapper import FobosSDR, FobosException
 
-def main():
-    """Main entry point for the FM receiver application."""
-    parser = argparse.ArgumentParser(description='Fobos SDR FM Receiver')
-    parser.add_argument('-f', '--frequency', type=float, default=DEFAULT_FREQ/1e6,
-                        help='FM station frequency in MHz (default: 95.5)')
-    parser.add_argument('-g', '--gain', type=float, default=GAIN,
-                        help='Receiver gain in dB (default: 12)')
-    parser.add_argument('-d', '--device', type=str, default=None,
-                        help='Audio output device name or ID')
-    
-    args = parser.parse_args()
-    
-    # Create and start the FM receiver
-    receiver = FMReceiver(
-        frequency=args.frequency * 1e6,
-        gain=args.gain,
-        audio_device=args.device
-    )
-    
-    try:
-        receiver.start()
-    except KeyboardInterrupt:
-        print("\nStopping FM receiver...")
-    except Exception as e:
-        print(f"Error: {e}")
-    finally:
-        receiver.stop()
-
-if __name__ == "__main__":
-    main()
-
 # Default configuration
 DEFAULT_FREQ = 95.5e6  # Default FM station frequency (95.5 MHz)
 SAMPLE_RATE = 2.048e6  # SDR sample rate
@@ -233,3 +202,37 @@ class FMReceiver:
                         print(f"Invalid gain command: {e}")
                 else:
                     print("Commands: f <MHz> (frequency), v <0.0-1.0> (volume), g <dB> (gain), q (quit)")
+        except Exception as e:
+            print(f"Error in FM receiver: {e}")
+            self.stop()
+
+def main():
+    """Main entry point for the FM receiver application."""
+    parser = argparse.ArgumentParser(description='Fobos SDR FM Receiver')
+    parser.add_argument('-f', '--frequency', type=float, default=DEFAULT_FREQ/1e6,
+                        help='FM station frequency in MHz (default: 95.5)')
+    parser.add_argument('-g', '--gain', type=float, default=GAIN,
+                        help='Receiver gain in dB (default: 12)')
+    parser.add_argument('-d', '--device', type=str, default=None,
+                        help='Audio output device name or ID')
+    
+    args = parser.parse_args()
+    
+    # Create and start the FM receiver
+    receiver = FMReceiver(
+        frequency=args.frequency * 1e6,
+        gain=args.gain,
+        audio_device=args.device
+    )
+    
+    try:
+        receiver.start()
+    except KeyboardInterrupt:
+        print("\nStopping FM receiver...")
+    except Exception as e:
+        print(f"Error: {e}")
+    finally:
+        receiver.stop()
+
+if __name__ == "__main__":
+    main()
