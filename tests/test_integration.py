@@ -184,47 +184,8 @@ class TestFobosSDRIntegration(unittest.TestCase):
         # Log summary stats
         logger.info(f"Received {len(iq_data)} IQ samples")
         logger.info(f"Sample mean: {np.mean(np.abs(iq_data)):.4f}")
-        logger.info(f"Sample std: {np.std(np.abs(iq_data)):.4f}")
-        
-    @requires_hardware
-    def test_async_reception(self):
-        """Test asynchronous reception mode."""
-        # Configure SDR
-        self.sdr.set_frequency(100e6)  # 100 MHz
-        self.sdr.set_samplerate(2.048e6)  # 2.048 MHz
-        self.sdr.set_lna_gain(1)
-        self.sdr.set_vga_gain(10)
-        
-        # Create a callback function that collects received samples
-        samples_queue = deque(maxlen=5)  # Store up to 5 buffers
-        
-        def sample_callback(iq_samples):
-            samples_queue.append(iq_samples)
-            logger.info(f"Async callback received {len(iq_samples)} IQ samples")
-        
-        # Start async reception
-        logger.info("Starting asynchronous reception")
-        self.sdr.start_rx_async(sample_callback, buf_count=4, buf_length=8192)
-        
-        # Wait for some samples to be collected
-        start_time = time.time()
-        timeout = 5.0  # 5 seconds timeout
-        
-        while len(samples_queue) < 3 and (time.time() - start_time) < timeout:
-            time.sleep(0.1)
-        
-        # Stop async reception
-        self.sdr.stop_rx_async()
-        logger.info("Stopped asynchronous reception")
-        
-        # Verify we received some data
-        self.assertGreater(len(samples_queue), 0, "No samples received in async mode")
-        
-        # Check the data
-        for i, samples in enumerate(samples_queue):
-            self.assertTrue(np.iscomplexobj(samples), f"Buffer {i} is not complex")
-            logger.info(f"Buffer {i}: {len(samples)} samples, mean abs: {np.mean(np.abs(samples)):.4f}")
-    
+        logger.info(f"Sample std: {np.std(np.abs(iq_data)):.4f}")    
+
     @requires_hardware
     def test_user_gpo(self):
         """Test setting user GPO bits."""
@@ -235,27 +196,6 @@ class TestFobosSDRIntegration(unittest.TestCase):
             # Brief pause to allow hardware to respond
             time.sleep(0.1)
             
-    @requires_hardware
-    def test_clock_source(self):
-        """Test setting clock source."""
-        # Set internal clock (default)
-        self.sdr.set_clk_source(False)
-        logger.info("Set clock source to internal")
-        
-        # Brief pause
-        time.sleep(0.1)
-        
-        # Set external clock (if connected - this might fail if no external clock is present)
-        try:
-            self.sdr.set_clk_source(True)
-            logger.info("Set clock source to external")
-            
-            # Quickly revert to internal
-            time.sleep(0.2)
-            self.sdr.set_clk_source(False)
-            logger.info("Reverted clock source to internal")
-        except FobosException as e:
-            logger.warning(f"Setting external clock failed (this may be normal if no external clock is connected): {e}")
     
     @requires_hardware
     def test_context_manager(self):

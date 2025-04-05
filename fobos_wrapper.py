@@ -43,6 +43,9 @@ class FobosSDR:
         self._callback = None
         self._callback_ctx = None
         self._buffer_ptr = None
+        self._keep_alive_ref = None
+        self._async_mode = False
+        self._sync_mode = False
 
     def _define_ffi_interface(self):
         self.ffi.cdef("""
@@ -140,12 +143,24 @@ class FobosSDR:
     def close(self):
         """Close the Fobos SDR device."""
         if self.dev is not None:
+            # Make sure to stop any active streaming first
+            if self._async_mode:
+                self.stop_rx_async()
+            if self._sync_mode:
+                self.stop_rx_sync()
+                
             self._check_error(self.lib.fobos_rx_close(self.dev))
             self.dev = None
 
     def reset(self):
         """Reset the Fobos SDR device."""
         if self.dev is not None:
+            # Make sure to stop any active streaming first
+            if self._async_mode:
+                self.stop_rx_async()
+            if self._sync_mode:
+                self.stop_rx_sync()
+                
             self._check_error(self.lib.fobos_rx_reset(self.dev))
             self.dev = None
 
@@ -223,72 +238,191 @@ class FobosSDR:
         """Create a C callback wrapper for the Python callback function."""
         @self.ffi.callback("void(float *, uint32_t, void *)")
         def _c_callback(buf, buf_length, ctx):
-            # Convert the buffer to a numpy array
-            buffer_size = buf_length
-            buffer = np.fromiter(
-                (self.ffi.cast("float *", buf)[i] for i in range(buffer_size)),
-                dtype=np.float32
-            )
-            
-            # Reshape the buffer to complex IQ samples (I and Q are interleaved)
-            iq_samples = buffer[0::2] + 1j * buffer[1::2]
-            
-            # Call the Python callback
-            python_callback(iq_samples)
+            try:
+                # Convert the buffer to a numpy array - use a safer approach with bounds checking
+                buffer_size = buf_length
+                if buffer_size <= 0:
+                    return
+                
+                # Create a numpy array and copy data from the CFFI buffer
+                buffer = np.zeros(buffer_size, dtype=np.float32)
+                for i in range(buffer_size):
+                    buffer[i] = self.ffi.cast("float *", buf)[i]
+                
+                # Make sure buffer length is even for complex conversion
+                if len(buffer) % 2 != 0:
+                    buffer = buffer[:-1]
+                    
+                # Reshape the buffer to complex IQ samples (I and Q are interleaved)
+                iq_samples = buffer[0::2] + 1j * buffer[1::2]
+                
+                # Call the Python callback with the samples
+                python_callback(iq_samples)
+            except Exception as e:
+                # Log any errors but don't let them propagate back to C
+                print(f"Error in async callback: {e}")
             
         return _c_callback
 
-    def start_rx_async(self, callback: Callable[[np.ndarray], None], buf_count: int = 16, buf_length: int = 16384):
-        """Start asynchronous receiving of IQ data."""
+    def start_rx_async(self, callback: Callable[[np.ndarray], None], buf_count: int = 16, buf_length: int = 32768):
+        """Start asynchronous receiving of IQ data.
+        
+        Args:
+            callback: Function to call with received IQ samples
+            buf_count: Number of buffers to use
+            buf_length: Buffer length in number of samples
+                      
+        Note: 
+            Buffer length is in terms of float values, so for complex samples, 
+            a buffer of 32768 will contain 16384 complex I/Q pairs.
+        """
         self._check_device_open()
         
+        # Make sure we're not already in another mode
+        if self._sync_mode:
+            self.stop_rx_sync()
+        if self._async_mode:
+            self.stop_rx_async()
+        
         # Save the Python callback and create a C callback wrapper
+        # The callback reference is kept to prevent garbage collection
+        self._python_callback = callback
         self._callback = self._callback_wrapper(callback)
+        
+        # Ensure reasonable buffer values
+        if buf_length < 1024:
+            buf_length = 1024
+        if buf_count < 4:
+            buf_count = 4
+        
+        # Make buffer length even for I/Q pairs
+        if buf_length % 2 != 0:
+            buf_length += 1
         
         # Start async reading
         self._check_error(self.lib.fobos_rx_read_async(
             self.dev, self._callback, self.ffi.NULL, buf_count, buf_length
         ))
+        
+        self._async_mode = True
 
     def stop_rx_async(self):
         """Stop asynchronous receiving of IQ data."""
-        if self.dev is not None:
-            self._check_error(self.lib.fobos_rx_cancel_async(self.dev))
-            self._callback = None
+        if self.dev is not None and self._async_mode:
+            try:
+                self._check_error(self.lib.fobos_rx_cancel_async(self.dev))
+            except Exception as e:
+                # Just log error since we're cleaning up
+                print(f"Warning: Error stopping async mode: {e}")
+            finally:
+                # Clean up references
+                self._callback = None
+                self._python_callback = None
+                self._async_mode = False
 
-    def start_rx_sync(self, buf_length: int = 16384):
-        """Start synchronous receiving mode."""
+    def start_rx_sync(self, buf_length: int = 32768):
+        """Start synchronous receiving mode with a larger default buffer.
+        
+        Args:
+            buf_length: Buffer length in number of samples (I+Q pairs)
+                       Must be a multiple of 2, defaults to 32768
+        """
         self._check_device_open()
-        self._check_error(self.lib.fobos_rx_start_sync(self.dev, buf_length))
-        # Pre-allocate a buffer for read_sync
-        self._buffer_ptr = self.ffi.new(f"float[{buf_length}]")
+        
+        # Make sure we're not already in another mode
+        if self._async_mode:
+            self.stop_rx_async()
+        if self._sync_mode:
+            self.stop_rx_sync()
+        
+        # Ensure reasonable buffer size
+        if buf_length < 1024:
+            buf_length = 1024
+            
+        # Ensure buffer length is a multiple of 2 for I/Q pairs
+        if buf_length % 2 != 0:
+            buf_length += 1
+        
+        # Store the buffer length for later use
         self._buffer_length = buf_length
+        
+        # Start sync mode - this tells the device what buffer size to use
+        self._check_error(self.lib.fobos_rx_start_sync(self.dev, buf_length))
+        
+        # Pre-allocate a buffer for read_sync - add some padding for safety
+        # Multiply by 2 to ensure we have enough space
+        self._buffer_ptr = self.ffi.new(f"float[{buf_length * 2}]")
+        
+        # Keep a reference to prevent garbage collection
+        self._keep_alive_ref = self._buffer_ptr
+        self._sync_mode = True
 
     def read_rx_sync(self) -> np.ndarray:
-        """Read samples in synchronous mode and return complex IQ array."""
+        """Read samples in synchronous mode and return complex IQ array.
+        
+        Returns:
+            np.ndarray: Complex IQ samples
+        
+        Raises:
+            RuntimeError: If synchronous mode not started
+            FobosException: If an error occurs during reading
+        """
         self._check_device_open()
-        if self._buffer_ptr is None:
+        
+        if not self._sync_mode or self._buffer_ptr is None:
             raise RuntimeError("Synchronous mode not started")
         
+        # Create pointer for actual length
         actual_len_ptr = self.ffi.new("uint32_t *")
-        self._check_error(self.lib.fobos_rx_read_sync(self.dev, self._buffer_ptr, actual_len_ptr))
         
-        actual_len = actual_len_ptr[0]
-        
-        # Convert to numpy array
-        buffer = np.fromiter(
-            (self._buffer_ptr[i] for i in range(actual_len)),
-            dtype=np.float32
-        )
-        
-        # Reshape the buffer to complex IQ samples (I and Q are interleaved)
-        return buffer[0::2] + 1j * buffer[1::2]
+        try:
+            # Read data into buffer
+            ret = self.lib.fobos_rx_read_sync(self.dev, self._buffer_ptr, actual_len_ptr)
+            self._check_error(ret)
+            
+            # Get actual number of samples read
+            actual_len = actual_len_ptr[0]
+            
+            if actual_len == 0:
+                # No data received
+                return np.array([], dtype=np.complex64)
+            
+            if actual_len > self._buffer_length * 2:
+                # Sanity check - shouldn't happen if C library is behaving
+                actual_len = self._buffer_length * 2
+            
+            # Copy data to numpy array - safer than using fromiter
+            buffer = np.zeros(actual_len, dtype=np.float32)
+            for i in range(actual_len):
+                buffer[i] = self._buffer_ptr[i]
+            
+            # Make sure length is even for complex conversion
+            if len(buffer) % 2 != 0:
+                buffer = buffer[:-1]
+            
+            # Create complex array from interleaved I/Q data
+            iq_samples = buffer[0::2] + 1j * buffer[1::2]
+            
+            return iq_samples
+            
+        except Exception as e:
+            # Make sure to stop sync mode if an error occurs to avoid device hanging
+            self.stop_rx_sync()
+            raise FobosException(-1, f"Error in read_rx_sync: {e}")
 
     def stop_rx_sync(self):
         """Stop synchronous receiving mode."""
-        if self.dev is not None:
-            self._check_error(self.lib.fobos_rx_stop_sync(self.dev))
-            self._buffer_ptr = None
+        if self.dev is not None and self._sync_mode:
+            try:
+                self._check_error(self.lib.fobos_rx_stop_sync(self.dev))
+            except Exception as e:
+                # Just log this error since we're cleaning up
+                print(f"Warning: Error stopping sync mode: {e}")
+            finally:
+                # Clean up references to allow garbage collection
+                self._buffer_ptr = None
+                self._keep_alive_ref = None
+                self._sync_mode = False
 
     def set_user_gpo(self, value: int):
         """Set user general purpose output bits (0x00-0xFF)."""
@@ -390,12 +524,13 @@ if __name__ == "__main__":
             
             # Example of synchronous receiving
             print("Starting synchronous reception...")
-            sdr.start_rx_sync(1024)
+            sdr.start_rx_sync(32768)  # Use larger buffer
             
             # Read some samples
             iq_data = sdr.read_rx_sync()
             print(f"Received {len(iq_data)} IQ samples")
-            print(f"First 5 samples: {iq_data[:5]}")
+            if len(iq_data) > 0:
+                print(f"First 5 samples: {iq_data[:5]}")
             
             # Stop synchronous receiving
             sdr.stop_rx_sync()
