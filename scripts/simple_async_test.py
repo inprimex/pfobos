@@ -16,9 +16,13 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Import the wrapper - adjust path as needed
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from fobos_wrapper import FobosSDR, FobosException
+# Add the project root to the Python path
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(script_dir)  # Assuming script is in ./scripts subdirectory
+sys.path.append(project_root)
+
+# Import the wrapper from the shared module
+from shared.fwrapper import FobosSDR, FobosException
 
 # Global variables for statistics
 total_samples = 0
@@ -57,9 +61,21 @@ def main():
         # Create SDR instance
         sdr = FobosSDR()
         
+        # Check for devices
+        device_count = sdr.get_device_count()
+        logger.info(f"Found {device_count} devices")
+        
+        if device_count == 0:
+            logger.error("No Fobos SDR devices found!")
+            return 1
+        
         # Open first device
         sdr.open(0)
         logger.info("Device opened successfully")
+        
+        # Get device info
+        info = sdr.get_board_info()
+        logger.info(f"Connected to {info['product']} (Serial: {info['serial']})")
         
         # Configure device
         actual_freq = sdr.set_frequency(100e6)
@@ -77,46 +93,59 @@ def main():
         
         # Start async reception
         logger.info("Starting async reception")
+        logger.info("Test will run for exactly 10 seconds and then exit")
         sdr.start_rx_async(async_callback, 16, 32768)
         
         # Run for exactly 10 seconds
         test_duration = 10
-        logger.info(f"Test will run for {test_duration} seconds...")
         start_time = time.time()
         
-        # Simple sleep-based approach
-        time.sleep(test_duration)
-        
-        # Set stop flag to prevent callback from processing more data
-        stop_flag = True
-        
-        # Calculate statistics
-        elapsed = time.time() - start_time
-        sample_rate_achieved = total_samples / elapsed if elapsed > 0 else 0
-        
-        logger.info(f"Test completed after {elapsed:.2f} seconds")
-        logger.info(f"Received {total_samples} samples in {buffer_count} buffers")
-        logger.info(f"Achieved sample rate: {sample_rate_achieved/1e6:.2f} MSps")
-        
-        # Stop reception and clean up
-        logger.info("Stopping async reception...")
-        sdr.stop_rx_async()
-        logger.info("Closing device...")
-        sdr.close()
+        try:
+            # Simple sleep-based approach
+            time.sleep(test_duration)
+        except KeyboardInterrupt:
+            logger.info("Test interrupted by user")
+        finally:
+            # Set stop flag to prevent callback from processing more data
+            stop_flag = True
+            
+            # Calculate statistics
+            elapsed = time.time() - start_time
+            sample_rate_achieved = total_samples / elapsed if elapsed > 0 else 0
+            
+            logger.info(f"Test completed after {elapsed:.2f} seconds")
+            logger.info(f"Received {total_samples} samples in {buffer_count} buffers")
+            logger.info(f"Achieved sample rate: {sample_rate_achieved/1e6:.2f} MSps")
+            
+            # Stop reception and clean up
+            logger.info("Stopping async reception...")
+            sdr.stop_rx_async()
+            logger.info("Closing device...")
+            sdr.close()
         
         logger.info("Test completed successfully")
         return 0
         
+    except FobosException as fe:
+        logger.error(f"Fobos SDR error: {fe}")
+        return 1
     except Exception as e:
         logger.error(f"Error in async test: {e}")
-        try:
-            # Attempt to clean up if there was an error
-            if 'sdr' in locals() and sdr.dev is not None:
-                sdr.stop_rx_async()
-                sdr.close()
-        except:
-            pass
+        import traceback
+        traceback.print_exc()
         return 1
+    finally:
+        # Attempt to clean up if there was an error
+        if 'sdr' in locals() and hasattr(sdr, 'dev') and sdr.dev is not None:
+            try:
+                logger.info("Emergency cleanup of device...")
+                if stop_flag is False:
+                    sdr.stop_rx_async()
+                sdr.close()
+            except Exception as e:
+                logger.error(f"Error during emergency cleanup: {e}")
 
 if __name__ == "__main__":
-    sys.exit(main())
+    exit_code = main()
+    logger.info(f"Exiting with code {exit_code}")
+    sys.exit(exit_code)

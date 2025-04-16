@@ -16,9 +16,13 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Import the wrapper - adjust path as needed
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from fobos_wrapper import FobosSDR, FobosException
+# Add the project root to the Python path
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(script_dir)  # Assuming script is in ./scripts subdirectory
+sys.path.append(project_root)
+
+# Import the wrapper from the shared module
+from shared.fwrapper import FobosSDR, FobosException
 
 def test_device_info():
     """Test basic device info to verify connectivity."""

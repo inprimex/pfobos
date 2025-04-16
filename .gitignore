@@ -175,3 +175,5 @@ cython_debug/
 
 # personal project artifacts
 TODO.MD
+
+spectrum_plots/
