@@ -18,12 +18,15 @@ import json
 import glob
 import numpy as np
 import matplotlib.pyplot as plt
+import platform
 from collections import defaultdict
 import logging
 
 # Add parent directory to path to import the wrapper
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
-from fobos_wrapper import FobosSDR, FobosException
+# Import from shared module
+from shared.fwrapper import FobosSDR, FobosException
+
 
 # Configure logging
 logging.basicConfig(
@@ -42,10 +45,12 @@ class FobosSDRBenchmark:
         self.output_dir = output_dir
         self.sdr = None
         self.results = defaultdict(list)
+        self.result_timestamps = defaultdict(list)  # Track timestamps for each measurement
+        self.result_details = defaultdict(list)     # Track additional details for each measurement
         
         # Ensure output directory exists
-        os.makedirs(output_dir, exist_ok=True)
-        
+        os.makedirs(output_dir, exist_ok=True)        
+
     def setup(self):
         """Set up the benchmark environment."""
         try:
@@ -81,9 +86,16 @@ class FobosSDRBenchmark:
         if self.sdr and self.sdr.dev is not None:
             self.sdr.close()
             
-    def record_result(self, test_name, metric, value):
-        """Record a benchmark result."""
-        self.results[f"{test_name}_{metric}"].append(value)
+    def record_result(self, test_name, metric, value, details=None):
+        """Record a benchmark result with timestamp and optional details."""
+        key = f"{test_name}_{metric}"
+        self.results[key].append(value)
+        self.result_timestamps[key].append(time.time())
+        
+        # Store additional details if provided
+        if details is None:
+            details = {}
+        self.result_details[key].append(details)
         
     def get_stats(self, test_name, metric):
         """Get statistics for a specific test metric."""
@@ -103,8 +115,9 @@ class FobosSDRBenchmark:
             'p99': float(np.percentile(values, 99))
         }
         
+    # Updated save_results method to include all the detailed logs
     def save_results(self):
-        """Save benchmark results to file."""
+        """Save benchmark results to file with detailed iteration logs."""
         if not self.results:
             logger.warning("No results to save.")
             return
@@ -112,27 +125,81 @@ class FobosSDRBenchmark:
         # Create a timestamp for the results
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         
-        # Save raw results as JSON
-        stats = {}
+        # Prepare the detailed results structure
+        detailed_results = {}
+        summary_stats = {}
+        
+        # Process each result key (test_name_metric)
         for key in self.results:
             test_name, metric = key.rsplit('_', 1)
-            if test_name not in stats:
-                stats[test_name] = {}
-            stats[test_name][metric] = self.get_stats(test_name, metric)
+            
+            # Create test_name entry if it doesn't exist
+            if test_name not in detailed_results:
+                detailed_results[test_name] = {}
+                summary_stats[test_name] = {}
+                
+            # Create metric entry if it doesn't exist
+            if metric not in detailed_results[test_name]:
+                detailed_results[test_name][metric] = {}
+                
+            # Add iteration data for this metric
+            values = self.results[key]
+            timestamps = self.result_timestamps[key]
+            details = self.result_details[key]
+            
+            iterations_data = []
+            
+            for i, (value, ts, detail) in enumerate(zip(values, timestamps, details)):
+                iteration_data = {
+                    "iteration": i + 1,
+                    "value": float(value),
+                    "timestamp": ts
+                }
+                # Add all additional details
+                iteration_data.update(detail)
+                iterations_data.append(iteration_data)
+                
+            detailed_results[test_name][metric]["iterations"] = iterations_data
+            
+            # Add summary statistics
+            if test_name not in summary_stats:
+                summary_stats[test_name] = {}
+            summary_stats[test_name][metric] = self.get_stats(test_name, metric)
+        
+        # Log run environment information
+        run_info = {
+            "start_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "python_version": sys.version,
+            "numpy_version": np.__version__,
+            "platform": sys.platform,
+            "machine": platform.machine() if hasattr(platform, "machine") else "unknown"
+        }
             
         # Get device info for metadata
         device_info = {}
         if self.sdr and self.sdr.dev is not None:
             try:
                 device_info = self.sdr.get_board_info()
+                # Add API info if available
+                try:
+                    api_info = self.sdr.get_api_info()
+                    device_info.update(api_info)
+                except:
+                    pass
             except:
-                pass
+                logger.warning("Could not get device board info for results metadata")
                 
-        # Create result data
+        # Create result data with both detailed logs and summary stats
         result_data = {
             'timestamp': timestamp,
             'device': device_info,
-            'stats': stats
+            'run_info': run_info,
+            'detailed_results': detailed_results,
+            'summary_stats': summary_stats,
+            'run_config': {
+                'device_index': self.device_index,
+                'output_dir': self.output_dir
+            }
         }
         
         # Save to JSON file
@@ -338,6 +405,7 @@ class FobosSDRBenchmark:
         finally:
             self.teardown()
             
+    # The benchmark_open_close method with improved logging
     def benchmark_open_close(self, iterations=3):
         """Benchmark device open/close performance."""
         logger.info("=== Benchmarking device open/close performance ===")
@@ -348,22 +416,42 @@ class FobosSDRBenchmark:
             
         for i in range(iterations):
             # Measure open time
+            iteration_start = time.time()
             start_time = time.time()
             self.sdr.open(self.device_index)
             open_time = time.time() - start_time
             
-            self.record_result("open_close", "open_time", open_time)
-            logger.info(f"Iteration {i+1}/{iterations}: Device opened in {open_time:.6f} seconds")
+            # Get some device info for context
+            try:
+                info = self.sdr.get_board_info()
+                device_info = {
+                    "serial": info.get("serial", "unknown"),
+                    "product": info.get("product", "unknown")
+                }
+            except:
+                device_info = {"error": "Could not get device info"}
             
-            # Verify device is open by getting board info
-            info = self.sdr.get_board_info()
+            details = {
+                "iteration": i + 1,
+                "timestamp": start_time,
+                "device_info": device_info
+            }
+            
+            self.record_result("open_close", "open_time", open_time, details)
+            logger.info(f"Iteration {i+1}/{iterations}: Device opened in {open_time:.6f} seconds")
             
             # Measure close time
             start_time = time.time()
             self.sdr.close()
             close_time = time.time() - start_time
             
-            self.record_result("open_close", "close_time", close_time)
+            close_details = {
+                "iteration": i + 1,
+                "timestamp": start_time,
+                "iteration_duration": time.time() - iteration_start
+            }
+            
+            self.record_result("open_close", "close_time", close_time, close_details)
             logger.info(f"Iteration {i+1}/{iterations}: Device closed in {close_time:.6f} seconds")
             
         # Print summary
@@ -372,6 +460,7 @@ class FobosSDRBenchmark:
         # Reopen the device for subsequent tests
         self.sdr.open(self.device_index)
         
+    # The benchmark_frequency_tuning method with improved logging
     def benchmark_frequency_tuning(self, iterations=3):
         """Benchmark frequency tuning performance."""
         logger.info("=== Benchmarking frequency tuning performance ===")
@@ -388,8 +477,18 @@ class FobosSDRBenchmark:
                 actual_freq = self.sdr.set_frequency(freq)
                 tuning_time = time.time() - start_time
                 
-                self.record_result("frequency_tuning", "time", tuning_time)
-                self.record_result("frequency_tuning", "accuracy", abs(actual_freq - freq) / freq)
+                # Record accuracy and timing with detailed context
+                tuning_details = {
+                    "iteration": i + 1,
+                    "target_frequency_mhz": freq_mhz,
+                    "target_frequency_hz": freq,
+                    "actual_frequency_hz": actual_freq,
+                    "error_percent": abs(actual_freq - freq) / freq * 100,
+                    "timestamp": start_time
+                }
+                
+                self.record_result("frequency_tuning", "time", tuning_time, tuning_details)
+                self.record_result("frequency_tuning", "accuracy", abs(actual_freq - freq) / freq, tuning_details)
                 
                 logger.info(f"Frequency {freq_mhz} MHz: Tuned to {actual_freq/1e6:.3f} MHz "
                             f"in {tuning_time:.6f} seconds "
@@ -397,6 +496,7 @@ class FobosSDRBenchmark:
                 
         # Print summary
         logger.info("Frequency tuning benchmark completed")
+
         
     def benchmark_samplerate_setting(self):
         """Benchmark sample rate setting performance."""
@@ -421,104 +521,299 @@ class FobosSDRBenchmark:
         # Print summary
         logger.info("Sample rate setting benchmark completed")
         
+    # The benchmark_sync_reception method with improved logging
     def benchmark_sync_reception(self, iterations=3):
         """Benchmark synchronous reception performance."""
         logger.info("=== Benchmarking synchronous reception performance ===")
         
-        # Test buffer sizes
-        buffer_sizes = [1024, 4096, 16384, 65536]
-        
-        # Set standard parameters
-        self.sdr.set_frequency(100e6)
-        self.sdr.set_samplerate(2.048e6)
-        
-        for buf_size in buffer_sizes:
-            logger.info(f"Testing with buffer size {buf_size}")
+        try:
+            # Test buffer sizes
+            buffer_sizes = [1024, 4096, 16384, 65536]
             
-            # Start synchronous reception
-            self.sdr.start_rx_sync(buf_size)
+            # Set standard parameters
+            current_freq = self.sdr.set_frequency(100e6)
+            current_rate = self.sdr.set_samplerate(2.048e6)
             
-            try:
-                for i in range(iterations):
-                    # Measure read time
-                    start_time = time.time()
-                    iq_data = self.sdr.read_rx_sync()
-                    read_time = time.time() - start_time
-                    
-                    # Calculate throughput
-                    throughput = len(iq_data) / read_time if read_time > 0 else 0
-                    
-                    self.record_result(f"sync_reception_{buf_size}", "read_time", read_time)
-                    self.record_result(f"sync_reception_{buf_size}", "throughput", throughput)
-                    
-                    logger.info(f"Iteration {i+1}/{iterations}: Read {len(iq_data)} samples "
-                                f"in {read_time:.6f} seconds "
-                                f"(throughput: {throughput:.2f} samples/second)")
-                                
-            finally:
-                # Stop synchronous reception
-                self.sdr.stop_rx_sync()
+            for buf_size in buffer_sizes:
+                logger.info(f"Testing with buffer size {buf_size}")
                 
-        # Print summary
-        logger.info("Synchronous reception benchmark completed")
-        
+                # Start synchronous reception
+                self.sdr.start_rx_sync(buf_size)
+                
+                try:
+                    for i in range(iterations):
+                        # Measure read time
+                        start_time = time.time()
+                        iq_data = self.sdr.read_rx_sync()
+                        read_time = time.time() - start_time
+                        
+                        # Calculate throughput
+                        throughput = len(iq_data) / read_time if read_time > 0 else 0
+                        
+                        # Record detailed metrics
+                        details = {
+                            "iteration": i + 1,
+                            "buffer_size": buf_size,
+                            "timestamp": start_time,
+                            "frequency_hz": current_freq,
+                            "sample_rate_hz": current_rate,
+                            "samples_received": len(iq_data),
+                            "expected_samples": buf_size // 2,  # Complex samples are half of buffer size
+                            "signal_stats": {
+                                "mean_amplitude": float(np.mean(np.abs(iq_data))) if len(iq_data) > 0 else 0,
+                                "max_amplitude": float(np.max(np.abs(iq_data))) if len(iq_data) > 0 else 0,
+                                "std_amplitude": float(np.std(np.abs(iq_data))) if len(iq_data) > 0 else 0
+                            }
+                        }
+                        
+                        self.record_result(f"sync_reception_{buf_size}", "read_time", read_time, details)
+                        self.record_result(f"sync_reception_{buf_size}", "throughput", throughput, details)
+                        
+                        logger.info(f"Iteration {i+1}/{iterations}: Read {len(iq_data)} samples "
+                                    f"in {read_time:.6f} seconds "
+                                    f"(throughput: {throughput:.2f} samples/second)")
+                                    
+                finally:
+                    # Stop synchronous reception
+                    self.sdr.stop_rx_sync()
+                    
+            # Print summary
+            logger.info("Synchronous reception benchmark completed")
+            
+        except Exception as e:
+            logger.error(f"Error in synchronous reception benchmark: {e}")
+            
+    # The benchmark_async_reception method with improved logging
     def benchmark_async_reception(self, iterations=3):
         """Benchmark asynchronous reception performance."""
         logger.info("=== Benchmarking asynchronous reception performance ===")
         
-        # Test buffer sizes
-        buffer_sizes = [4096, 16384, 65536]
-        
-        # Set standard parameters
-        self.sdr.set_frequency(100e6)
-        self.sdr.set_samplerate(2.048e6)
-        
-        for buf_size in buffer_sizes:
-            logger.info(f"Testing with buffer size {buf_size}")
+        try:
+            # Test buffer sizes (all powers of 2 from 1K to 64K)
+            buffer_sizes = [1024, 2048, 4096, 8192, 16384, 32768, 65536]
             
-            for i in range(iterations):
-                # Setup for gathering metrics
-                received_samples = 0
-                callback_times = []
+            # Set standard parameters
+            current_freq = self.sdr.set_frequency(100e6)
+            current_rate = self.sdr.set_samplerate(2.048e6)
+            
+            for buf_size in buffer_sizes:
+                logger.info(f"Testing with buffer size {buf_size}")
                 
-                def sample_callback(iq_samples):
-                    nonlocal received_samples
-                    callback_time = time.time()
-                    callback_times.append(callback_time)
-                    received_samples += len(iq_samples)
+                for i in range(iterations):
+                    # Setup for gathering metrics
+                    received_samples = 0
+                    callback_times = []
+                    callback_samples = []
+                    iteration_start = time.time()
+                    
+                    def sample_callback(iq_samples):
+                        callback_time = time.time()
+                        callback_times.append(callback_time)
+                        callback_samples.append(len(iq_samples))
+                        nonlocal received_samples
+                        received_samples += len(iq_samples)
+                    
+                    # Start async reception
+                    start_time = time.time()
+                    self.sdr.start_rx_async(sample_callback, buf_count=4, buf_length=buf_size)
+                    
+                    # Let it run for a short time
+                    time.sleep(1.0)
+                    
+                    # Stop async reception
+                    logger.info("Stopping async reception")
+                    self.sdr.stop_rx_async()
+                    
+                    # Allow time for cleanup
+                    time.sleep(0.3)
+                    
+                    # Calculate metrics
+                    total_time = 0
+                    throughput = 0
+                    
+                    if callback_times:
+                        total_time = max(callback_times) - start_time
+                        throughput = received_samples / total_time if total_time > 0 else 0
+                    
+                    # Prepare detailed metrics
+                    callback_details = []
+                    for idx, (cb_time, samples) in enumerate(zip(callback_times, callback_samples)):
+                        callback_details.append({
+                            "callback_index": idx + 1,
+                            "timestamp": cb_time,
+                            "elapsed_since_start": cb_time - start_time,
+                            "samples_received": samples
+                        })
+                    
+                    # Record all intervals if we have at least 2 callbacks
+                    if len(callback_times) >= 2:
+                        intervals = np.diff(callback_times)
+                        mean_interval = np.mean(intervals)
+                        
+                        interval_details = {
+                            "iteration": i + 1,
+                            "buffer_size": buf_size,
+                            "timestamp": start_time,
+                            "frequency_hz": current_freq,
+                            "sample_rate_hz": current_rate,
+                            "total_samples": received_samples,
+                            "total_callbacks": len(callback_times),
+                            "total_duration": total_time,
+                            "callback_intervals_ms": [interval * 1000 for interval in intervals.tolist()],
+                            "mean_interval_ms": mean_interval * 1000,
+                            "std_interval_ms": float(np.std(intervals)) * 1000 if len(intervals) > 0 else 0,
+                            "min_interval_ms": float(np.min(intervals)) * 1000 if len(intervals) > 0 else 0,
+                            "max_interval_ms": float(np.max(intervals)) * 1000 if len(intervals) > 0 else 0,
+                            "callback_details": callback_details
+                        }
+                        
+                        self.record_result(f"async_reception_{buf_size}", "callback_interval", mean_interval, interval_details)
+                        logger.info(f"Mean interval between callbacks: {mean_interval:.6f} seconds")
+                    
+                    # Record throughput
+                    throughput_details = {
+                        "iteration": i + 1,
+                        "buffer_size": buf_size,
+                        "timestamp": start_time,
+                        "frequency_hz": current_freq,
+                        "sample_rate_hz": current_rate, 
+                        "total_samples": received_samples,
+                        "total_callbacks": len(callback_times),
+                        "total_duration": total_time,
+                        "callback_details": callback_details
+                    }
+                    
+                    self.record_result(f"async_reception_{buf_size}", "throughput", throughput, throughput_details)
+                    
+                    logger.info(f"Iteration {i+1}/{iterations}: Received {received_samples} samples "
+                                f"in {total_time:.6f} seconds across {len(callback_times)} callbacks "
+                                f"(throughput: {throughput:.2f} samples/second)")
+                    
+                    # Allow some time between iterations
+                    time.sleep(0.5)
+                    
+            # Print summary
+            logger.info("Asynchronous reception benchmark completed")
+            
+        except Exception as e:
+            logger.error(f"Error in asynchronous reception benchmark: {e}")
+            import traceback
+            traceback.print_exc()
+            
+
+    def benchmark_async_reception_legacy(self, iterations=3):
+        """Benchmark asynchronous reception performance."""
+        logger.info("=== Benchmarking asynchronous reception performance ===")
+        
+        try:
+            # Test buffer sizes
+            buffer_sizes = [4096, 16384, 65536]
+            
+            # Set standard parameters
+            current_freq = self.sdr.set_frequency(100e6)
+            current_rate = self.sdr.set_samplerate(2.048e6)
+            
+            for buf_size in buffer_sizes:
+                logger.info(f"Testing with buffer size {buf_size}")
                 
-                # Start async reception
-                start_time = time.time()
-                self.sdr.start_rx_async(sample_callback, buf_count=4, buf_length=buf_size)
-                
-                # Let it run for a short time
-                time.sleep(1.0)
-                
-                # Stop async reception
-                self.sdr.stop_rx_async()
-                
-                # Calculate metrics
-                total_time = callback_times[-1] - start_time if callback_times else 0
-                throughput = received_samples / total_time if total_time > 0 else 0
-                
-                # Calculate latency if we have at least 2 callbacks
-                if len(callback_times) >= 2:
-                    intervals = np.diff(callback_times)
-                    mean_interval = np.mean(intervals)
-                    self.record_result(f"async_reception_{buf_size}", "callback_interval", mean_interval)
-                    logger.info(f"Mean interval between callbacks: {mean_interval:.6f} seconds")
-                
-                self.record_result(f"async_reception_{buf_size}", "throughput", throughput)
-                
-                logger.info(f"Iteration {i+1}/{iterations}: Received {received_samples} samples "
-                            f"in {total_time:.6f} seconds across {len(callback_times)} callbacks "
-                            f"(throughput: {throughput:.2f} samples/second)")
-                
-                # Allow some time between iterations
-                time.sleep(0.5)
-                
-        # Print summary
-        logger.info("Asynchronous reception benchmark completed")
+                for i in range(iterations):
+                    # Setup for gathering metrics
+                    received_samples = 0
+                    callback_times = []
+                    callback_samples = []
+                    stop_flag = False
+                    iteration_start = time.time()
+                    
+                    def sample_callback(iq_samples):
+                        nonlocal received_samples, callback_times, callback_samples, stop_flag
+                        if stop_flag:
+                            return
+                        callback_time = time.time()
+                        callback_times.append(callback_time)
+                        callback_samples.append(len(iq_samples))
+                        received_samples += len(iq_samples)
+                    
+                    # Start async reception
+                    start_time = time.time()
+                    self.sdr.start_rx_async(sample_callback, buf_count=4, buf_length=buf_size)
+                    
+                    # Let it run for a short time
+                    time.sleep(1.0)
+                    
+                    # Set stop flag to prevent callback race conditions
+                    stop_flag = True
+                    time.sleep(0.1)  # Brief pause for flag to take effect
+                    
+                    # Stop async reception
+                    self.sdr.stop_rx_async()
+                    
+                    # Calculate metrics
+                    total_time = callback_times[-1] - start_time if callback_times else 0
+                    throughput = received_samples / total_time if total_time > 0 else 0
+                    
+                    # Prepare detailed metrics
+                    callback_details = []
+                    for idx, (cb_time, samples) in enumerate(zip(callback_times, callback_samples)):
+                        callback_details.append({
+                            "callback_index": idx + 1,
+                            "timestamp": cb_time,
+                            "elapsed_since_start": cb_time - start_time,
+                            "samples_received": samples
+                        })
+                    
+                    # Record all intervals if we have at least 2 callbacks
+                    if len(callback_times) >= 2:
+                        intervals = np.diff(callback_times)
+                        mean_interval = np.mean(intervals)
+                        
+                        interval_details = {
+                            "iteration": i + 1,
+                            "buffer_size": buf_size,
+                            "timestamp": start_time,
+                            "frequency_hz": current_freq,
+                            "sample_rate_hz": current_rate,
+                            "total_samples": received_samples,
+                            "total_callbacks": len(callback_times),
+                            "total_duration": total_time,
+                            "callback_intervals_ms": [interval * 1000 for interval in intervals.tolist()],
+                            "mean_interval_ms": mean_interval * 1000,
+                            "std_interval_ms": float(np.std(intervals)) * 1000,
+                            "min_interval_ms": float(np.min(intervals)) * 1000 if len(intervals) > 0 else 0,
+                            "max_interval_ms": float(np.max(intervals)) * 1000 if len(intervals) > 0 else 0,
+                            "callback_details": callback_details
+                        }
+                        
+                        self.record_result(f"async_reception_{buf_size}", "callback_interval", mean_interval, interval_details)
+                        logger.info(f"Mean interval between callbacks: {mean_interval:.6f} seconds")
+                    
+                    # Record throughput
+                    throughput_details = {
+                        "iteration": i + 1,
+                        "buffer_size": buf_size,
+                        "timestamp": start_time,
+                        "frequency_hz": current_freq,
+                        "sample_rate_hz": current_rate, 
+                        "total_samples": received_samples,
+                        "total_callbacks": len(callback_times),
+                        "total_duration": total_time,
+                        "callback_details": callback_details
+                    }
+                    
+                    self.record_result(f"async_reception_{buf_size}", "throughput", throughput, throughput_details)
+                    
+                    logger.info(f"Iteration {i+1}/{iterations}: Received {received_samples} samples "
+                                f"in {total_time:.6f} seconds across {len(callback_times)} callbacks "
+                                f"(throughput: {throughput:.2f} samples/second)")
+                    
+                    # Allow some time between iterations
+                    time.sleep(0.5)
+                    
+            # Print summary
+            logger.info("Asynchronous reception benchmark completed")
+            
+        except Exception as e:
+            logger.error(f"Error in asynchronous reception benchmark: {e}")
+
         
     def benchmark_data_processing(self):
         """Benchmark data processing performance."""

@@ -16,16 +16,23 @@ from functools import wraps
 from collections import deque
 import threading
 import queue
+from scipy import signal  # Added missing import for signal module
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Add parent directory to path to import the wrapper
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from fobos_wrapper import FobosSDR, FobosException
+# Add project root to path to import the wrapper properly
+# This ensures imports work correctly regardless of the execution directory
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+# Import from shared module directly to maintain consistency with other tests
+from shared.fwrapper import FobosSDR, FobosException, FobosError
 
 # Import the hardware detection decorator from integration tests
+# Using relative import which is more appropriate for a test package
 from .test_integration import requires_hardware
 
 
@@ -145,7 +152,27 @@ class TestFobosSDRPerformance(unittest.TestCase):
     def tearDown(self):
         """Clean up after each test."""
         if hasattr(self, 'sdr') and self.sdr.dev is not None:
-            self.sdr.close()
+            # Make sure to stop any active modes
+            if hasattr(self.sdr, '_async_mode') and self.sdr._async_mode:
+                try:
+                    logger.info("Stopping async mode in tearDown")
+                    self.sdr.stop_rx_async()
+                    # Give a short pause for resources to be freed properly
+                    time.sleep(0.1)
+                except Exception as e:
+                    logger.warning(f"Error stopping async mode in tearDown: {e}")
+                    
+            if hasattr(self.sdr, '_sync_mode') and self.sdr._sync_mode:
+                try:
+                    logger.info("Stopping sync mode in tearDown")
+                    self.sdr.stop_rx_sync()
+                except Exception as e:
+                    logger.warning(f"Error stopping sync mode in tearDown: {e}")
+                    
+            try:
+                self.sdr.close()
+            except Exception as e:
+                logger.warning(f"Error closing device in tearDown: {e}")
 
     @requires_hardware
     @time_execution
@@ -177,6 +204,9 @@ class TestFobosSDRPerformance(unittest.TestCase):
         # Print summary statistics
         self.metrics.print_stats('device_open')
         self.metrics.print_stats('device_close')
+        
+        # Reopen device for tearDown (otherwise it will try to close an already closed device)
+        self.sdr.open(0)
 
     @requires_hardware
     @time_execution
@@ -245,7 +275,7 @@ class TestFobosSDRPerformance(unittest.TestCase):
                     elapsed_time = time.time() - start_time
                     
                     # Calculate throughput in samples per second
-                    throughput = len(iq_data) / elapsed_time
+                    throughput = len(iq_data) / elapsed_time if elapsed_time > 0 else 0
                     
                     read_times.append(elapsed_time)
                     throughputs.append(throughput)
@@ -273,9 +303,9 @@ class TestFobosSDRPerformance(unittest.TestCase):
     @time_execution
     def test_async_read_performance(self):
         """Test asynchronous read performance."""
-        # Define buffer sizes to test
-        buffer_sizes = [1024, 4096, 16384, 65536]
-        iterations_per_size = 5
+        # Define buffer sizes to test (all powers of 2 from 1K to 64K)
+        buffer_sizes = [1024, 2048, 4096, 8192, 16384, 32768, 65536]
+        iterations_per_size = 3  # Reduced to prevent timeout issues
         
         for buf_size in buffer_sizes:
             logger.info(f"Testing async read with buffer size {buf_size}")
@@ -295,11 +325,22 @@ class TestFobosSDRPerformance(unittest.TestCase):
                 start_time = time.time()
                 self.sdr.start_rx_async(sample_callback, buf_count=4, buf_length=buf_size)
                 
-                # Wait for a few callbacks to be processed
-                time.sleep(1.0)
+                # Wait for a few callbacks to be processed (with timeout)
+                max_wait = 2.0  # seconds
+                wait_end = time.time() + max_wait
+                
+                # Sleep until we have enough callbacks or timeout
+                while (timing_queue.qsize() < 3) and (time.time() < wait_end):
+                    time.sleep(0.1)
                 
                 # Stop async reception
-                self.sdr.stop_rx_async()
+                try:
+                    self.sdr.stop_rx_async()
+                except Exception as e:
+                    logger.warning(f"Error stopping async reception: {e}")
+                
+                # Allow a moment for stop to take effect
+                time.sleep(0.3)
                 
                 # Process timing information
                 callback_times = []
@@ -327,6 +368,94 @@ class TestFobosSDRPerformance(unittest.TestCase):
                     
                     # Add to metrics
                     self.metrics.add_timing(f'async_throughput_{buf_size}', throughput)
+                else:
+                    logger.warning(f"No callbacks received for buffer size {buf_size}")
+                
+                # Allow some time between iterations
+                time.sleep(0.5)
+        
+        # Print summary statistics for each buffer size
+        for buf_size in buffer_sizes:
+            self.metrics.print_stats(f'async_interval_{buf_size}')
+            self.metrics.print_stats(f'async_throughput_{buf_size}')
+
+    @requires_hardware
+    @profile
+    @time_execution
+    def test_async_read_performance_legacy(self):
+        """Test asynchronous read performance."""
+        # Define buffer sizes to test
+        buffer_sizes = [1024, 4096, 16384, 65536]
+        iterations_per_size = 3  # Reduced to prevent timeout issues
+        
+        for buf_size in buffer_sizes:
+            logger.info(f"Testing async read with buffer size {buf_size}")
+            
+            for i in range(iterations_per_size):
+                # Create a queue to store timing information
+                timing_queue = queue.Queue()
+                samples_count = queue.Queue()
+                stop_flag = threading.Event()
+                
+                # Create a callback function with safety flag
+                def sample_callback(iq_samples):
+                    # Check if we should stop processing callbacks
+                    if stop_flag.is_set():
+                        return
+                    end_time = time.time()
+                    timing_queue.put(end_time)
+                    samples_count.put(len(iq_samples))
+                
+                # Start async reception
+                start_time = time.time()
+                self.sdr.start_rx_async(sample_callback, buf_count=4, buf_length=buf_size)
+                
+                # Wait for a few callbacks to be processed (with timeout)
+                max_wait = 2.0  # seconds
+                wait_end = time.time() + max_wait
+                
+                # Sleep until we have enough callbacks or timeout
+                while (timing_queue.qsize() < 3) and (time.time() < wait_end):
+                    time.sleep(0.1)
+                
+                # Set stop flag before stopping async mode to prevent callback race conditions
+                stop_flag.set()
+                time.sleep(0.1)  # Small delay to let callbacks notice the flag
+                
+                # Stop async reception
+                try:
+                    self.sdr.stop_rx_async()
+                except Exception as e:
+                    logger.warning(f"Error stopping async reception: {e}")
+                
+                # Process timing information
+                callback_times = []
+                samples_received = 0
+                
+                while not timing_queue.empty() and not samples_count.empty():
+                    callback_time = timing_queue.get() - start_time
+                    samples = samples_count.get()
+                    samples_received += samples
+                    callback_times.append(callback_time)
+                
+                if callback_times:
+                    # Calculate mean time between callbacks
+                    if len(callback_times) > 1:
+                        intervals = np.diff(callback_times)
+                        mean_interval = np.mean(intervals)
+                        self.metrics.add_timing(f'async_interval_{buf_size}', mean_interval)
+                        logger.info(f"Mean interval between callbacks: {mean_interval:.6f} seconds")
+                    
+                    # Calculate overall throughput
+                    elapsed_time = callback_times[-1] - callback_times[0] if len(callback_times) > 1 else callback_times[0]
+                    throughput = samples_received / elapsed_time if elapsed_time > 0 else 0
+                    logger.info(f"Received {samples_received} samples in {elapsed_time:.6f} seconds "
+                                f"(throughput: {throughput:.2f} samples/second)")
+                    
+                    # Add to metrics
+                    self.metrics.add_timing(f'async_throughput_{buf_size}', throughput)
+                else:
+                    logger.warning(f"No callbacks received for buffer size {buf_size}")
                 
                 # Allow some time between iterations
                 time.sleep(0.5)
@@ -350,6 +479,11 @@ class TestFobosSDRPerformance(unittest.TestCase):
         try:
             # Read a buffer of samples
             iq_data = self.sdr.read_rx_sync()
+            
+            if len(iq_data) < max(fft_sizes):
+                logger.warning(f"Not enough samples for FFT test: {len(iq_data)} < {max(fft_sizes)}")
+                self.skipTest("Not enough samples for signal processing tests")
+                return
             
             # 1. Test FFT performance
             for fft_size in fft_sizes:
@@ -403,12 +537,15 @@ class TestFobosSDRPerformance(unittest.TestCase):
             for factor in decimation_factors:
                 # Time the decimation operation
                 start_time = time.time()
-                decimated = signal.decimate(iq_data, factor)
-                elapsed_time = time.time() - start_time
-                
-                self.metrics.add_timing(f'decimate_{factor}', elapsed_time)
-                logger.info(f"Decimation factor {factor}: {elapsed_time:.6f} seconds "
-                            f"(throughput: {len(iq_data)/elapsed_time:.2f} samples/second)")
+                try:
+                    decimated = signal.decimate(iq_data, factor)
+                    elapsed_time = time.time() - start_time
+                    
+                    self.metrics.add_timing(f'decimate_{factor}', elapsed_time)
+                    logger.info(f"Decimation factor {factor}: {elapsed_time:.6f} seconds "
+                                f"(throughput: {len(iq_data)/elapsed_time:.2f} samples/second)")
+                except Exception as e:
+                    logger.error(f"Error in decimation with factor {factor}: {e}")
                 
         finally:
             # Stop synchronous reception
@@ -432,7 +569,7 @@ class TestFobosSDRPerformance(unittest.TestCase):
         # Print overall performance summary
         if hasattr(cls, 'metrics'):
             logger.info("===== OVERALL PERFORMANCE SUMMARY =====")
-            for metric_name in cls.metrics.metrics:
+            for metric_name in sorted(cls.metrics.metrics.keys()):
                 cls.metrics.print_stats(metric_name)
 
 

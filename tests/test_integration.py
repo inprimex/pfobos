@@ -240,6 +240,136 @@ class TestFobosSDRIntegration(unittest.TestCase):
         self.callback_called = False
         self.samples_received = 0
         
+        # Add an explicit mechanism to signal test end from callback
+        self.callback_active = True
+        self.max_callbacks = 10  # Limit number of callbacks to prevent infinite loop
+        self.callback_count = 0
+        
+        # Safe callback function that has timeout and count limits
+        def safe_callback(samples):
+            try:
+                if not self.callback_active or self.callback_count >= self.max_callbacks:
+                    return
+                    
+                self.callback_called = True
+                self.samples_received += len(samples)
+                self.callback_count += 1
+                logger.info(f"Received {len(samples)} samples in callback ({self.callback_count}/{self.max_callbacks})")
+                
+                # Auto-terminate after reaching callback limit
+                if self.callback_count >= self.max_callbacks:
+                    self.callback_active = False
+                    logger.info("Reached callback limit - signaling completion")
+            except Exception as e:
+                logger.error(f"Error in callback: {e}")
+        
+        # Configure SDR
+        self.sdr.set_frequency(100e6)  # 100 MHz
+        self.sdr.set_samplerate(2.048e6)  # 2.048 MHz
+        self.sdr.set_lna_gain(1)
+        self.sdr.set_vga_gain(10)
+        
+        # Start async reception with small buffer for quick response
+        logger.info("Starting async reception")
+        try:
+            self.sdr.start_rx_async(safe_callback, buf_count=4, buf_length=1024)
+            
+            # Wait for some data with a strict timeout
+            max_wait = 10.0  # seconds
+            start_time = time.time()
+            
+            while (self.callback_active and 
+                self.callback_count < self.max_callbacks and 
+                time.time() - start_time < max_wait):
+                time.sleep(0.1)
+            
+            # Force test to complete if we hit timeout
+            if time.time() - start_time >= max_wait:
+                logger.warning("Test timed out waiting for callbacks")
+                self.callback_active = False
+            
+            # Check that we received something
+            self.assertTrue(self.callback_called, "Callback was never called")
+            self.assertGreater(self.samples_received, 0, "No samples were received")
+            
+        finally:
+            # Always stop async reception to prevent system from hanging
+            logger.info("Stopping async reception")
+            # Set our callback state to inactive before stopping
+            self.callback_active = False
+            
+            # Allow a moment for callbacks to notice the flag is off
+            time.sleep(0.2)
+            
+            # Now stop the async reception
+            self.sdr.stop_rx_async()
+            
+            # Wait for async to fully stop with timeout
+            stop_wait_start = time.time()
+            stop_wait_max = 5.0
+            while hasattr(self.sdr, '_async_mode') and self.sdr._async_mode and time.time() - stop_wait_start < stop_wait_max:
+                time.sleep(0.1)
+                
+            if hasattr(self.sdr, '_async_mode') and self.sdr._async_mode:
+                logger.error("Failed to stop async mode within timeout")
+
+    @requires_hardware
+    def test_safe_async_reception_legacy2(self):
+        """Test async reception with enhanced safety measures."""
+        # This variable will let us know the callback was called
+        self.callback_called = False
+        self.samples_received = 0
+        self.callback_error = None
+        
+        # Safe callback function that can't crash
+        def safe_callback(samples):
+            try:
+                self.callback_called = True
+                self.samples_received += len(samples)
+                logger.info(f"Received {len(samples)} samples in callback")
+            except Exception as e:
+                self.callback_error = e
+                logger.error(f"Error in callback: {e}")
+        
+        # Configure SDR
+        self.sdr.set_frequency(100e6)  # 100 MHz
+        self.sdr.set_samplerate(2.048e6)  # 2.048 MHz
+        self.sdr.set_lna_gain(1)
+        self.sdr.set_vga_gain(10)
+        
+        # Start async reception with small buffer for quick response
+        logger.info("Starting async reception")
+        try:
+            self.sdr.start_rx_async(safe_callback, buf_count=4, buf_length=1024)
+            
+            # Wait for some data
+            max_wait = 2.0  # seconds
+            start_time = time.time()
+            
+            while not self.callback_called and time.time() - start_time < max_wait:
+                time.sleep(0.1)
+            
+            # Check that we received something
+            self.assertTrue(self.callback_called, "Callback was never called")
+            self.assertGreater(self.samples_received, 0, "No samples were received")
+            self.assertIsNone(self.callback_error, "Callback encountered an error")
+            
+        finally:
+            # Always stop async reception to prevent system from hanging
+            logger.info("Stopping async reception")
+            self.sdr.stop_rx_async()
+            
+            # Wait for async to fully stop
+            time.sleep(0.5)
+
+
+    @requires_hardware
+    def test_safe_async_reception_legacy(self):
+        """Test async reception with enhanced safety measures."""
+        # This variable will let us know the callback was called
+        self.callback_called = False
+        self.samples_received = 0
+        
         # Safe callback function that can't crash
         def safe_callback(samples):
             try:

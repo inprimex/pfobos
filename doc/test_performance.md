@@ -1,35 +1,46 @@
 # Fobos SDR Performance Testing
 
-A comprehensive performance testing solution for the Fobos SDR Python wrapper. This package helps benchmark and analyze the performance of key SDR operations.
+This document describes the unit-test based performance testing solution for the Fobos SDR Python wrapper.
 
 ## Overview
 
-This performance testing package consists of two main components:
+The performance testing module (`tests/test_performance.py`) provides a structured approach to measure and validate the performance of various Fobos SDR operations. It's integrated with the unittest framework to allow for automated performance verification.
 
-1. **Unit Test-Based Performance Tests** (`tests/test_performance.py`) - Performance tests integrated with the unittest framework
-2. **Standalone Benchmark Tool** (`benchmark.py`) - A script for running benchmarks and generating reports
+## Purpose
 
-![Performance Testing Architecture](https://via.placeholder.com/800x400?text=Fobos+SDR+Performance+Testing)
+The primary goals of the performance tests are:
+
+1. Detect performance regressions during development
+2. Verify that the SDR wrapper meets minimum performance requirements
+3. Ensure consistent behavior across different environments
+4. Provide baseline performance metrics for comparison
+
+Unlike the comprehensive benchmark tool (`benchmark.py`), these tests focus on quick verification rather than detailed analysis.
 
 ## Requirements
 
 - Python 3.7+
-- Fobos SDR Python wrapper (fobos_wrapper.py)
+- Fobos SDR Python wrapper (`shared/fwrapper.py`)
 - Python packages:
   - numpy
-  - matplotlib
-  - scipy (for signal processing tests)
+  - scipy
 - Fobos SDR hardware
-
-## Installation
-
-Ensure that the `test_performance.py` file is in your `tests` directory and that `benchmark.py` is in your project root.
 
 ## Running the Tests
 
-### Unit Test-Based Performance Tests
+### Using run_tests.py
 
-Run performance tests using the unittest framework:
+To run only the performance tests:
+
+```bash
+# Run only performance tests
+python run_tests.py --performance-only
+
+# With verbose output
+python run_tests.py --performance-only --verbose
+```
+
+### Using unittest directly
 
 ```bash
 # Run all performance tests
@@ -39,160 +50,114 @@ python -m unittest tests.test_performance
 python -m unittest tests.test_performance.TestFobosSDRPerformance.test_sync_read_performance
 ```
 
-### Standalone Benchmark Tool
-
-Run the benchmark tool for more comprehensive testing and reporting:
-
-```bash
-# Run all benchmarks
-python benchmark.py
-
-# Specify device index (if multiple SDRs are connected)
-python benchmark.py --device 1
-
-# Specify number of iterations
-python benchmark.py --iterations 5
-
-# Specify output directory
-python benchmark.py --output-dir ./my_benchmarks
-
-# Only generate comparison plots from existing results
-python benchmark.py --plot-only
-```
-
 ## Test Categories
 
-### Device Operations Tests
+The performance tests include:
 
-- Open/close performance
-- Frequency tuning performance
-- Sample rate setting performance
-- User GPO setting performance
-- Clock source switching performance
+### Device Control Tests
+- `test_open_close_performance`: Tests how quickly the device can be opened and closed
+- `test_frequency_change_performance`: Tests frequency tuning time across multiple frequencies
+- `test_samplerate_change_performance`: Tests sample rate adjustment performance
 
 ### Data Reception Tests
-
-- Synchronous read performance (various buffer sizes)
-- Asynchronous read performance (various buffer sizes)
-- Callback latency measurement
-- Data throughput measurement
+- `test_sync_read_performance`: Tests synchronous data reading performance with various buffer sizes
+- `test_async_read_performance`: Tests asynchronous data reception performance and callback latency
 
 ### Signal Processing Tests
-
-- FFT performance (various sizes)
-- Filter performance (various tap counts)
-- FM demodulation performance
-- Decimation performance
-
-## Benchmark Results
-
-The benchmark tool generates detailed results in multiple formats:
-
-### JSON Results
-
-Each benchmark run generates a JSON file with detailed metrics and statistics:
-
-```
-benchmark_results/
-└── benchmark_20250323_120000.json
-```
-
-The JSON file includes:
-- Timestamp of the run
-- Device information
-- Detailed metrics for each test
-- Statistical analyses (min, max, mean, median, std dev, percentiles)
-
-### Performance Plots
-
-Individual plots for each metric are generated in the plots directory:
-
-```
-benchmark_results/
-└── plots/
-    ├── sync_reception_16384_throughput_20250323_120000.png
-    ├── frequency_tuning_time_20250323_120000.png
-    └── ...
-```
-
-### Comparison Plots
-
-When multiple benchmark runs exist, comparison plots are generated:
-
-```
-benchmark_results/
-└── comparison_plots/
-    ├── compare_sync_reception_16384_throughput_20250323_120500.png
-    ├── compare_frequency_tuning_time_20250323_120500.png
-    └── ...
-```
+- `test_signal_processing_performance`: Tests performance of common SDR operations:
+  - FFT (various sizes)
+  - Filtering
+  - FM demodulation
+  - Decimation
 
 ## Interpreting Results
 
-### Key Metrics to Monitor
+Each test outputs timing and performance metrics to the console. Key metrics to monitor:
 
-1. **Device Control Latency**
-   - Open/close times
-   - Frequency tuning times
-   - Sample rate setting times
+1. **Device operations**: Should complete within tens of milliseconds
+2. **Synchronous read**: Throughput should be consistent with the configured sample rate
+3. **Asynchronous callbacks**: Should have consistent intervals
+4. **Signal processing**: Should scale according to complexity (O(n log n) for FFT, etc.)
 
-2. **Data Throughput**
-   - Samples processed per second
-   - Maximum sustainable sample rate
+## Performance Thresholds
 
-3. **Processing Performance**
-   - FFT performance vs size
-   - Filtering performance vs complexity
-   - Demodulation speed
+While the tests don't enforce strict pass/fail thresholds, these guidelines can help identify potential issues:
 
-4. **Callback Latency**
-   - Time between async callbacks
-   - Callback processing time
-
-### Performance Comparison
-
-Use the comparison plots to track performance changes:
-- Across different versions of the wrapper
-- After hardware/firmware updates
-- Between different host systems
-- With different configuration settings
+- **Device open/close**: Typically < 50ms
+- **Frequency change**: Typically < 10ms
+- **Sample rate change**: Typically < 20ms
+- **Synchronous read**: Should achieve at least 80% of the theoretical maximum rate
+- **FFT processing**: Should complete in < 5ms for 1024-point FFT
+- **FM demodulation**: Should process data faster than real-time
 
 ## Troubleshooting
 
-### Common Issues
+Common issues and solutions:
 
-1. **Benchmark hangs during async tests**
-   - The tests include timeouts to prevent indefinite hangs
-   - Check USB connectivity if timeouts occur frequently
+1. **"No Fobos SDR hardware detected"**
+   - Verify the device is properly connected
+   - Check USB connection and permissions
+   - Run `lsusb` to confirm device visibility
 
-2. **High variability in results**
-   - Run with more iterations for more stable averages
-   - Check for background processes consuming CPU resources
-   - Try closing other applications using USB bandwidth
+2. **Tests running slowly**
+   - Close other applications that might be using USB bandwidth
+   - Check for background processes consuming CPU
+   - Verify system is not throttling due to power management
 
-3. **Plots not showing expected data**
-   - Ensure the benchmark completed successfully
-   - Check console output for error messages
-   - Verify that the output directory is writable
+3. **"Error in async callback"**
+   - This is often caused by USB communication issues
+   - Try reconnecting the device
+   - Reduce the number of iterations to minimize the chance of USB errors
+
+4. **Division by zero errors**
+   - This can happen if timing operations complete too quickly
+   - Try larger buffer sizes or more complex operations
 
 ## Extending the Tests
 
-### Adding New Performance Tests
+To add a new performance test:
 
-To add new performance tests to the unittest-based framework:
+1. Create a new test method in the `TestFobosSDRPerformance` class
+2. Use the `@requires_hardware` decorator to skip when hardware is unavailable
+3. Use `@time_execution` to automatically log execution time
+4. Use `@profile` if you want detailed profiling information
+5. Add metrics collection with `self.metrics.add_timing(name, value)`
 
-1. Add a new test method to `TestFobosSDRPerformance` in `test_performance.py`
-2. Use the `@requires_hardware`, `@time_execution`, and/or `@profile` decorators
-3. Use the metrics collection methods to record and analyze results
+Example:
 
-### Adding New Benchmarks
+```python
+@requires_hardware
+@time_execution
+def test_my_new_function(self):
+    """Test performance of my new function."""
+    iterations = 5
+    
+    for i in range(iterations):
+        start_time = time.time()
+        # Perform the operation to be tested
+        result = self.sdr.my_function()
+        elapsed_time = time.time() - start_time
+        
+        self.metrics.add_timing('my_function', elapsed_time)
+        logger.info(f"Operation completed in {elapsed_time:.6f} seconds")
+    
+    # Print summary statistics
+    self.metrics.print_stats('my_function')
+```
 
-To add new benchmarks to the benchmark tool:
+## Comparing with Benchmark Tool
 
-1. Add a new benchmark method to the `FobosSDRBenchmark` class in `benchmark.py`
-2. Use the `record_result` method to store measurements
-3. Make sure to update the `run_all_benchmarks` method to include your new benchmark
+The performance tests provide quick verification, while the benchmark tool (`benchmark.py`) offers:
 
-## License
+- More detailed metrics and statistics
+- Visual plots and reports
+- Historical comparison
+- JSON output for further analysis
 
-This performance testing package is licensed under the MIT License - see the LICENSE file for details.
+If you need comprehensive analysis rather than quick verification, consider using the benchmark tool.
+
+## See Also
+
+- [Benchmark Tool Documentation](./benchmark.md)
+- [Integration Tests Documentation](./tests.md)
+- [Setup Guide](./setup-fobos-sdr.md)

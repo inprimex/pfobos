@@ -162,6 +162,62 @@ The main class providing access to the SDR hardware.
 
 The wrapper converts C library error codes to Python exceptions. All errors are raised as `FobosException` with appropriate error messages.
 
+
+# Performance Testing
+
+The Fobos SDR project includes two complementary approaches to performance testing:
+
+## 1. Performance Unit Tests
+
+The `tests/test_performance.py` file provides unittest-based performance testing that:
+- Measures execution time of key operations
+- Validates performance across different buffer sizes and configurations
+- Can be integrated into automated testing workflows
+- Provides quick validation that performance meets requirements
+
+### Running Performance Tests
+
+```bash
+# Run only performance tests
+python run_tests.py --performance-only
+
+# With verbose output
+python run_tests.py --performance-only --verbose
+```
+
+## 2. Comprehensive Benchmark Tool
+
+The `benchmark.py` script offers more detailed performance analysis:
+- Generates rich statistical metrics for each operation
+- Creates visual plots of performance results
+- Enables comparison between multiple benchmark runs
+- Saves detailed reports for later analysis
+
+### Running the Benchmark Tool
+
+```bash
+# Run the benchmark tool
+python run_tests.py --benchmark
+
+# With custom settings
+python run_tests.py --benchmark --iterations 5 --device 0 --output-dir ./my_benchmarks
+
+# Generate comparison plots from existing results
+python run_tests.py --benchmark --plot-only
+```
+
+## When to Use Each Approach
+
+- **Performance Tests**: For quick verification during development or CI/CD pipelines
+- **Benchmark Tool**: For detailed analysis, optimization, and performance reporting
+
+## Documentation
+
+For detailed information about each testing approach, see:
+- [Performance Tests Documentation](./doc/test_performance.md)
+- [Benchmark Tool Documentation](./doc/benchmark.md)
+
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.

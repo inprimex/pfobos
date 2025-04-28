@@ -1,6 +1,8 @@
 # Fobos SDR Tests
 
-This directory contains tests for the Fobos SDR Python wrapper. The tests are designed to verify the functionality of the wrapper without requiring actual hardware, except for the integration tests.
+This documentaton for testsing the Fobos SDR Python wrapper. 
+
+The tests are designed to verify the functionality of the wrapper without requiring actual hardware, except for the integration tests.
 
 ## Test Structure
 

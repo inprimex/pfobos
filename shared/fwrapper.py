@@ -7,6 +7,7 @@ import os
 import sys
 import ctypes
 import numpy as np
+import time
 from enum import IntEnum
 from typing import Callable, List, Optional, Tuple, Union, Any
 from cffi import FFI
@@ -271,6 +272,100 @@ class FobosSDR:
             callback: Function to call with received IQ samples
             buf_count: Number of buffers to use
             buf_length: Buffer length in number of samples
+                    
+        Note: 
+            Buffer length is in terms of float values, so for complex samples, 
+            a buffer of 32768 will contain 16384 complex I/Q pairs.
+        """
+        self._check_device_open()
+        
+        # Make sure we're not already in another mode
+        if self._sync_mode:
+            self.stop_rx_sync()
+        if self._async_mode:
+            self.stop_rx_async()
+        
+        # Initialize flag for safe stopping
+        self._async_stop_flag = False
+        
+        # Save the Python callback and create a C callback wrapper
+        # The callback reference is kept to prevent garbage collection
+        self._python_callback = callback
+        
+        # Create a wrapper for the callback that checks the stop flag
+        @self.ffi.callback("void(float *, uint32_t, void *)")
+        def _c_callback(buf, buf_length, ctx):
+            try:
+                # Check stop flag to prevent race conditions during shutdown
+                if hasattr(self, '_async_stop_flag') and self._async_stop_flag:
+                    return
+                    
+                # Don't process if buffer is empty or invalid
+                if buf_length <= 0:
+                    return
+                
+                # Create a numpy array and copy data from the CFFI buffer with bounds checking
+                buffer = np.zeros(buf_length, dtype=np.float32)
+                for i in range(min(buf_length, len(buffer))):
+                    buffer[i] = self.ffi.cast("float *", buf)[i]
+                
+                # Make sure buffer length is even for complex conversion
+                if len(buffer) % 2 != 0:
+                    buffer = buffer[:-1]
+                    
+                # Reshape the buffer to complex IQ samples (I and Q are interleaved)
+                iq_samples = buffer[0::2] + 1j * buffer[1::2]
+                
+                # Call the Python callback with the samples
+                # Use try/except to ensure any callback errors don't propagate back to C
+                try:
+                    self._python_callback(iq_samples)
+                except Exception as e:
+                    print(f"Error in user callback: {e}")
+            except Exception as e:
+                # Log any errors but don't let them propagate back to C
+                print(f"Error in async callback wrapper: {e}")
+        
+        # Store the callback for later use and to prevent garbage collection
+        self._callback = _c_callback
+        
+        # Ensure reasonable buffer values
+        if buf_length < 1024:
+            buf_length = 1024
+        if buf_count < 4:
+            buf_count = 4
+        
+        # Make buffer length even for I/Q pairs
+        if buf_length % 2 != 0:
+            buf_length += 1
+        
+        try:
+            # Start async reading
+            self._check_error(self.lib.fobos_rx_read_async(
+                self.dev, self._callback, self.ffi.NULL, buf_count, buf_length
+            ))
+            
+            # Mark as running only after successful start
+            self._async_mode = True
+            
+            # Store parameters for debugging and cleanup
+            self._async_buf_count = buf_count
+            self._async_buf_length = buf_length
+            
+        except Exception as e:
+            # Clean up references if starting fails
+            self._callback = None
+            self._python_callback = None
+            self._async_stop_flag = False
+            raise FobosException(-1, f"Error starting async mode: {e}")
+
+    def start_rx_async_legacy(self, callback: Callable[[np.ndarray], None], buf_count: int = 16, buf_length: int = 32768):
+        """Start asynchronous receiving of IQ data.
+        
+        Args:
+            callback: Function to call with received IQ samples
+            buf_count: Number of buffers to use
+            buf_length: Buffer length in number of samples
                       
         Note: 
             Buffer length is in terms of float values, so for complex samples, 
@@ -307,6 +402,74 @@ class FobosSDR:
         self._async_mode = True
 
     def stop_rx_async(self):
+        """Stop asynchronous receiving of IQ data."""
+        if self.dev is not None and self._async_mode:
+            # Set stop flag first to prevent callback race conditions
+            self._async_stop_flag = True
+            
+            # Give a small delay to ensure callbacks notice the flag
+            time.sleep(0.1)
+            
+            # Use a timeout approach to ensure we don't get stuck
+            start_time = time.time()
+            max_wait = 5.0  # Maximum 5 seconds to wait for cancellation
+            
+            try:
+                # Attempt to cancel the async operations
+                cancel_result = self.lib.fobos_rx_cancel_async(self.dev)
+                
+                # Wait for cancellation to complete, but with timeout
+                while self._async_mode and time.time() - start_time < max_wait:
+                    time.sleep(0.1)
+                    # Try to handle events to help process cancellation
+                    try:
+                        # Optional: If we have access to libusb event handling
+                        # self.lib.libusb_handle_events_timeout_completed(self.dev.libusb_ctx, ...)
+                        pass
+                    except:
+                        pass
+                
+                # Force cleanup if we hit timeout
+                if self._async_mode and time.time() - start_time >= max_wait:
+                    print("Warning: Async cancellation timed out - forcing cleanup")
+                
+            except Exception as e:
+                # Log error but continue with cleanup
+                print(f"Warning: Error stopping async mode: {e}")
+            finally:
+                # Always clean up references even if cancel fails
+                self._callback = None
+                self._python_callback = None
+                self._async_mode = False
+                self._async_stop_flag = False
+
+    def stop_rx_async_legacy2(self):
+        """Stop asynchronous receiving of IQ data."""
+        if self.dev is not None and self._async_mode:
+            # Set flag first to prevent callback race conditions
+            self._async_stop_flag = True
+            
+            # Give a small delay to ensure callbacks notice the flag
+            # This helps avoid use-after-free or callback-during-cleanup issues
+            time.sleep(0.1)
+            
+            try:
+                # Attempt to cancel the async operations
+                self._check_error(self.lib.fobos_rx_cancel_async(self.dev))
+                
+                # Allow a bit more time for libusb to process the cancellation
+                time.sleep(0.2)
+            except Exception as e:
+                # Log the error but continue cleanup
+                print(f"Warning: Error stopping async mode: {e}")
+            finally:
+                # Ensure all references are cleaned up even if cancel fails
+                self._callback = None
+                self._python_callback = None
+                self._async_mode = False
+                self._async_stop_flag = False
+
+    def stop_rx_async_legacy(self):
         """Stop asynchronous receiving of IQ data."""
         if self.dev is not None and self._async_mode:
             try:

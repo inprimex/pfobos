@@ -9,6 +9,7 @@ import sys
 import logging
 import os
 import time
+import importlib.util
 
 class StatusTestResult(unittest.TextTestResult):
     """Custom test result class that provides detailed status reporting."""
@@ -117,11 +118,65 @@ def parse_args():
                         help='Skip mock tests')
     parser.add_argument('--no-logic', action='store_true',
                         help='Skip wrapper logic tests')
+    parser.add_argument('--performance-only', '-p', action='store_true',
+                        help='Run only performance tests (requires hardware)')
+    parser.add_argument('--benchmark', '-b', action='store_true',
+                        help='Run the benchmark tool instead of unit tests')
+    parser.add_argument('--device', type=int, default=0,
+                        help='Device index to use for benchmark (default: 0)')
+    parser.add_argument('--iterations', type=int, default=3,
+                        help='Number of iterations for benchmark (default: 3)')
+    parser.add_argument('--output-dir', type=str, default="benchmark_results",
+                        help='Directory to save benchmark results (default: benchmark_results)')
+    parser.add_argument('--plot-only', action='store_true',
+                        help='Only generate plots from existing benchmark results')
     return parser.parse_args()
+
+def run_benchmark(args):
+    """Run the benchmark tool with the provided arguments."""
+    # Find benchmark.py in the tests directory
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    benchmark_path = os.path.join(project_root, 'tests', 'benchmark.py')
+    
+    if not os.path.exists(benchmark_path):
+        print(f"Error: benchmark.py not found at {benchmark_path}")
+        return 1
+        
+    print(f"Running benchmark from {benchmark_path}")
+    
+    # Load the benchmark module
+    spec = importlib.util.spec_from_file_location("benchmark", benchmark_path)
+    benchmark_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(benchmark_module)
+    
+    # Create a FobosSDRBenchmark instance with the provided arguments
+    benchmark = benchmark_module.FobosSDRBenchmark(args.device, args.output_dir)
+    
+    if args.plot_only:
+        # Just generate comparison plots from existing results
+        benchmark.generate_comparison_plots()
+        print("Benchmark plots generated successfully")
+        return 0
+    else:
+        # Run all benchmarks
+        success = benchmark.run_all_benchmarks(args.iterations)
+        
+        if success:
+            # Also generate comparison plots
+            benchmark.generate_comparison_plots()
+            print("Benchmarking completed successfully")
+            return 0
+        else:
+            print("Benchmarking failed")
+            return 1
 
 def run_tests():
     """Run the test suite."""
     args = parse_args()
+    
+    # Check if we should run the benchmark tool instead of unit tests
+    if args.benchmark:
+        return run_benchmark(args)
     
     # Configure logging level
     if args.verbose:
@@ -137,18 +192,28 @@ def run_tests():
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
     
-    # Add test modules based on arguments
-    if not args.no_mock:
-        from tests import test_mock_fobos
-        suite.addTest(loader.loadTestsFromModule(test_mock_fobos))
-        
-    if not args.no_logic:
-        from tests import test_wrapper_logic
-        suite.addTest(loader.loadTestsFromModule(test_wrapper_logic))
-        
-    if args.integration:
-        from tests import test_integration
-        suite.addTest(loader.loadTestsFromModule(test_integration))
+    # Handle performance-only case
+    if args.performance_only:
+        from tests import test_performance
+        suite.addTest(loader.loadTestsFromModule(test_performance))
+        print("Running performance tests only (requires hardware)")
+    else:
+        # Add test modules based on arguments
+        if not args.no_mock:
+            from tests import test_mock_fobos
+            suite.addTest(loader.loadTestsFromModule(test_mock_fobos))
+            
+        if not args.no_logic:
+            from tests import test_wrapper_logic
+            suite.addTest(loader.loadTestsFromModule(test_wrapper_logic))
+            
+        if args.integration:
+            from tests import test_integration
+            suite.addTest(loader.loadTestsFromModule(test_integration))
+            
+            # Also include performance tests when integration is enabled
+            from tests import test_performance
+            suite.addTest(loader.loadTestsFromModule(test_performance))
     
     # Run the tests with our custom runner
     verbosity = 2 if args.verbose else 1
