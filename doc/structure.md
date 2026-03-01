@@ -34,7 +34,23 @@ fmreceiver/
 └── fobos_fm_receiver_paplay.py  # FM receiver with PulseAudio output
 ```
 
-### 4. Tests and Benchmarks (`tests/`)
+### 4. WebUI (`webui/`)
+
+Browser-based real-time spectrum viewer (FastAPI + WebSocket, no display server needed):
+
+```
+webui/
+├── server.py             # FastAPI app: REST API + WebSocket /ws broadcaster
+├── sdr_worker.py         # Background thread: IQ → FFT → asyncio queue
+├── __main__.py           # python -m webui.server entry point
+└── static/
+    ├── index.html        # Bootstrap 5 SPA
+    └── app.js            # WebSocket client + Canvas 2D + WebFFT (CDN)
+```
+
+Run: `uv run python -m webui.server --stub` → open `http://localhost:8000`.
+
+### 5. Tests and Benchmarks (`tests/`)
 
 Comprehensive testing framework:
 
@@ -49,7 +65,7 @@ tests/
 └── test_wrapper_logic.py # Tests for wrapper logic and error handling
 ```
 
-### 5. Setup and Configuration (`setup/`)
+### 6. Setup and Configuration (`setup/`)
 
 Hardware and environment setup:
 
@@ -58,7 +74,7 @@ setup/
 └── setup-fobos-sdr.sh    # Udev rules and permissions setup for Linux
 ```
 
-### 6. Scripts and Utilities (`scripts/`)
+### 7. Scripts and Utilities (`scripts/`)
 
 Helper scripts and examples:
 
@@ -92,8 +108,10 @@ doc/
 ├── fwrapper.md           # API reference for the wrapper
 ├── rtanalyzer.md         # Spectrum analyzer usage and features
 ├── setup-fobos-sdr.md    # Hardware setup instructions
+├── structure.md          # This file — project layout guide
 ├── test_performance.md   # Performance testing framework
-└── tests.md              # Testing infrastructure overview
+├── tests.md              # Testing infrastructure overview
+└── webui.md              # WebUI server, API, frontend architecture
 ```
 
 ## Project Configuration
@@ -128,7 +146,9 @@ doc/
 
 3. **Running applications**:
    ```bash
-   python run_rtanalyzer.py           # Launch spectrum analyzer
+   uv run python run_rtanalyzer.py                    # Desktop spectrum analyzer
+   uv run python -m webui.server --stub               # Browser WebUI (stub mode)
+   uv run python -m webui.server --host 0.0.0.0       # Browser WebUI (LAN accessible)
    ```
 
 ## Development Workflow

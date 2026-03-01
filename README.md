@@ -1,258 +1,155 @@
-# PFobos SDR Python Wrapper
+# PFobos — Python wrapper for Fobos SDR
 
-<span style="color:red">The development in the starting point</span>
-
-A comprehensive Python wrapper for the Fobos Software Defined Radio (SDR) C library. This project allows Python developers to easily interface with Fobos SDR hardware for various radio applications including spectrum analysis and FM demodulation.
-
-![Fobos SDR](https://github.com/rigexpert/libfobos)
+Python wrapper for the [Fobos SDR](https://github.com/rigexpert/libfobos) C library (`libfobos`).
+Provides a Pythonic, NumPy-integrated API for spectrum analysis and FM demodulation,
+plus a browser-based spectrum viewer that runs without physical hardware.
 
 ## Features
 
-- Full Python interface to all Fobos SDR C library functions
-- Easy-to-use object-oriented API
-- Support for both synchronous and asynchronous I/Q sample collection
-- NumPy integration for efficient signal processing
-- Example applications for spectrum analysis and FM radio reception
-- Comprehensive error handling and resource management
-- Cross-platform compatibility (Windows, Linux, macOS)
-
-## Installation
-
-### Prerequisites
-
-- Python 3.7 or higher
-- NumPy
-- SciPy
-- CFFI
-- Matplotlib (for spectrum analyzer example)
-- SoundDevice (for FM receiver example)
-- Fobos SDR hardware
-- Fobos SDR C library for your platform
-
-### Install Dependencies
-
-```bash
-pip install numpy scipy cffi matplotlib sounddevice
-```
-
-### Library Installation
-
-1. Obtain the Fobos SDR library for your platform:
-   - Windows: `fobos.dll`
-   - Linux: `libfobos.so`
-   - macOS: `libfobos.dylib`
-
-2. Place the library in your system path or in the same directory as your Python code.
-
-3. Clone this repository:
-```bash
-git clone https://github.com/yourusername/fobos-sdr-python.git
-cd fobos-sdr-python
-```
+- Full Python interface to Fobos SDR via CFFI bindings
+- Synchronous and asynchronous IQ sample collection
+- NumPy `complex64` output — plug directly into scipy/numpy signal processing
+- Real-time spectrum analyzer (matplotlib, requires X server / TkAgg)
+- **Browser-based WebUI** — spectrum, waterfall, IQ constellation; works in WSL2 without a display
+- FM radio demodulation with audio output
+- C stub library for hardware-free development and testing (no USB device needed)
+- 25 stub integration tests + mock unit tests
 
 ## Quick Start
 
+### Package manager
+
+This project uses [uv](https://docs.astral.sh/uv/).
+
+```bash
+uv sync              # core deps
+uv sync --extra webui   # + FastAPI / uvicorn for WebUI
+uv sync --extra audio   # + sounddevice / pulsectl for FM receiver
+```
+
+### Hardware setup (Linux)
+
+```bash
+sudo ./setup/setup-fobos-sdr.sh   # install udev rules
+uv run python run_setup.py        # verify environment
+```
+
+WSL2: use `usbipd` to forward the USB device from Windows to WSL.
+
+### Run without hardware (stub mode)
+
+```bash
+# Build the C stub library once
+uv run python tests/stub/build.py
+
+# Run tests
+uv run pytest tests/test_stub_integration.py -v   # 25 integration tests
+
+# Launch WebUI (no hardware needed)
+uv run python -m webui.server --stub
+# Open http://localhost:8000 in any browser
+```
+
+## Applications
+
+### WebUI — browser spectrum viewer
+
+```bash
+uv sync --extra webui
+uv run python -m webui.server --stub               # stub (no hardware)
+uv run python -m webui.server                      # real Fobos SDR device
+uv run python -m webui.server --host 0.0.0.0       # accessible from Windows browser / LAN
+```
+
+Open `http://localhost:8000`. Live panels:
+
+| Panel | Description |
+|-------|-------------|
+| Spectrum | FFT power vs frequency (dB), absolute axis labels |
+| Waterfall | Scrolling heatmap (plasma colormap) |
+| IQ Constellation | I/Q scatter for last frame |
+
+Controls: center frequency, sample rate, LNA/VGA gain, FFT size.
+Toggle between server-side FFT (numpy) and client-side FFT ([WebFFT](https://github.com/IQEngine/WebFFT)).
+
+See [doc/webui.md](doc/webui.md) for full details.
+
+### Spectrum Analyzer (desktop)
+
+Requires X server (not needed in WSL2 without VcXsrv/WSLg).
+
+```bash
+uv run python run_rtanalyzer.py
+```
+
+### FM Receiver
+
+```bash
+uv run python -m fmreceiver.fobos_fm_receiver -f 95.5
+```
+
+## API Example
+
 ```python
-from fobos_wrapper import FobosSDR
+from shared.fwrapper import FobosSDR
 
-# Create and open a device
 with FobosSDR() as sdr:
-    # Get connected devices
-    device_count = sdr.get_device_count()
-    print(f"Found {device_count} devices")
-    
-    if device_count > 0:
-        # Open first device
-        sdr.open(0)
-        
-        # Get board info
-        info = sdr.get_board_info()
-        print(f"Connected to {info['product']} (SN: {info['serial']})")
-        
-        # Set frequency to 100 MHz
-        actual_freq = sdr.set_frequency(100e6)
-        print(f"Tuned to {actual_freq/1e6:.3f} MHz")
-        
-        # Set sample rate to 2.048 MHz
-        actual_rate = sdr.set_samplerate(2.048e6)
-        print(f"Sample rate: {actual_rate/1e6:.3f} MHz")
-        
-        # Get samples in synchronous mode
-        sdr.start_rx_sync(1024)
-        iq_samples = sdr.read_rx_sync()
-        sdr.stop_rx_sync()
-        
-        print(f"Received {len(iq_samples)} IQ samples")
+    sdr.open(0)
+    sdr.set_frequency(100e6)
+    sdr.set_samplerate(2.048e6)
+    sdr.set_lna_gain(1)
+    sdr.set_vga_gain(10)
+    sdr.start_rx_sync(32768)
+    iq = sdr.read_rx_sync()   # numpy complex64 array
+    sdr.stop_rx_sync()
+    print(f"Got {len(iq)} IQ samples")
 ```
 
-## Example Applications
-
-### Spectrum Analyzer
-
-Run the spectrum analyzer example to visualize the RF spectrum:
+## Testing
 
 ```bash
-python fobos_spectrum_analyzer.py
+# No hardware
+uv run python run_tests.py               # mock + logic tests
+uv run python tests/stub/build.py        # build stub once
+uv run pytest tests/test_stub_integration.py -v
+
+# Hardware required
+uv run python run_tests.py --integration
+uv run python run_tests.py --performance-only
+uv run python run_tests.py --benchmark
 ```
 
-This will display a real-time spectrum plot centered at 100 MHz with a 2.048 MHz bandwidth.
+See [doc/tests.md](doc/tests.md) for full testing documentation.
 
-### FM Radio Receiver
+## Project Structure
 
-Run the FM radio receiver example to demodulate and listen to FM broadcasts:
-
-```bash
-python fobos_fm_receiver.py -f 95.5
 ```
-
-Optional arguments:
-- `-f, --frequency`: FM station frequency in MHz (default: 95.5)
-- `-g, --gain`: Receiver gain in dB (default: 12)
-- `-d, --device`: Audio output device name or ID
-
-## API Reference
-
-### FobosSDR Class
-
-The main class providing access to the SDR hardware.
-
-#### Basic Methods
-
-- `get_api_info()`: Get API version information
-- `get_device_count()`: Get the number of connected devices
-- `list_devices()`: Get a list of connected device serial numbers
-- `open(index)`: Open a device by index
-- `close()`: Close the device
-- `reset()`: Reset the device
-- `get_board_info()`: Get device information
-
-#### Configuration Methods
-
-- `set_frequency(freq_hz)`: Set receiver frequency in Hz
-- `set_direct_sampling(enabled)`: Enable/disable direct sampling mode
-- `set_lna_gain(value)`: Set LNA gain (0-2)
-- `set_vga_gain(value)`: Set VGA gain (0-15)
-- `get_samplerates()`: Get available sample rates
-- `set_samplerate(rate_hz)`: Set sample rate in Hz
-- `set_user_gpo(value)`: Set user GPO bits
-- `set_clk_source(external)`: Set clock source (internal/external)
-
-#### Advanced Frequency Control
-
-- `set_max2830_frequency(freq_hz)`: Set MAX2830 frequency explicitly
-- `set_rffc507x_lo_frequency(freq_hz)`: Set RFFC507x LO frequency
-
-#### Synchronous Reception
-
-- `start_rx_sync(buf_length)`: Start synchronous reception
-- `read_rx_sync()`: Read samples synchronously (returns NumPy array)
-- `stop_rx_sync()`: Stop synchronous reception
-
-#### Asynchronous Reception
-
-- `start_rx_async(callback, buf_count, buf_length)`: Start asynchronous reception
-- `stop_rx_async()`: Stop asynchronous reception
-
-#### Firmware Operations
-
-- `read_firmware(filename, verbose)`: Read firmware from device to file
-- `write_firmware(filename, verbose)`: Write firmware from file to device
-
-## Error Handling
-
-The wrapper converts C library error codes to Python exceptions. All errors are raised as `FobosException` with appropriate error messages.
-
-
-# Performance Testing
-
-The Fobos SDR project includes two complementary approaches to performance testing:
-
-## 1. Performance Unit Tests
-
-The `tests/test_performance.py` file provides unittest-based performance testing that:
-- Measures execution time of key operations
-- Validates performance across different buffer sizes and configurations
-- Can be integrated into automated testing workflows
-- Provides quick validation that performance meets requirements
-
-### Running Performance Tests
-
-```bash
-# Run only performance tests
-python run_tests.py --performance-only
-
-# With verbose output
-python run_tests.py --performance-only --verbose
+pfobos/
+├── shared/fwrapper.py        # Core: FobosSDR class (CFFI bindings)
+├── webui/                    # Browser spectrum viewer (FastAPI + WebSocket)
+│   ├── server.py             # FastAPI app + REST + WebSocket /ws
+│   ├── sdr_worker.py         # Background IQ reader + FFT → asyncio queue
+│   └── static/               # index.html, app.js (Canvas 2D + WebFFT)
+├── rtanalyzer/               # Real-time spectrum analyzer (matplotlib)
+├── fmreceiver/               # FM demodulation + audio output
+├── tests/                    # Tests, benchmarks, C stub library
+│   └── stub/                 # libfobos_stub.c → libfobos.so (no hardware)
+├── scripts/                  # Dev/debug helpers
+├── setup/                    # udev rules installer
+└── doc/                      # Per-component documentation
 ```
-
-## 2. Comprehensive Benchmark Tool
-
-The `benchmark.py` script offers more detailed performance analysis:
-- Generates rich statistical metrics for each operation
-- Creates visual plots of performance results
-- Enables comparison between multiple benchmark runs
-- Saves detailed reports for later analysis
-
-### Running the Benchmark Tool
-
-```bash
-# Run the benchmark tool
-python run_tests.py --benchmark
-
-# With custom settings
-python run_tests.py --benchmark --iterations 5 --device 0 --output-dir ./my_benchmarks
-
-# Generate comparison plots from existing results
-python run_tests.py --benchmark --plot-only
-```
-
-## When to Use Each Approach
-
-- **Performance Tests**: For quick verification during development or CI/CD pipelines
-- **Benchmark Tool**: For detailed analysis, optimization, and performance reporting
 
 ## Documentation
 
-For detailed information about each testing approach, see:
-- [Performance Tests Documentation](./doc/test_performance.md)
-- [Benchmark Tool Documentation](./doc/benchmark.md)
-
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+| Doc | Description |
+|-----|-------------|
+| [doc/webui.md](doc/webui.md) | WebUI server, API, frontend architecture |
+| [doc/fwrapper.md](doc/fwrapper.md) | FobosSDR API reference |
+| [doc/rtanalyzer.md](doc/rtanalyzer.md) | Desktop spectrum analyzer |
+| [doc/tests.md](doc/tests.md) | Testing infrastructure |
+| [doc/benchmark.md](doc/benchmark.md) | Benchmark tool |
+| [doc/structure.md](doc/structure.md) | Full project structure |
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-- Fobos SDR team for the hardware and C library
-- Contributors to this project
-- The open-source SDR community
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Library not found**: Ensure the Fobos SDR library is in your system path or the same directory as your Python code.
-
-2. **No devices found**: Check that your Fobos SDR is properly connected and recognized by your system.
-
-3. **Permission errors**: On Linux, you may need to add udev rules to access the SDR hardware without root privileges.
-
-4. **Import errors**: Verify that all required Python dependencies are installed.
-
-## Contact
-
-If you have questions, suggestions, or need help with this project, please:
-
-- Open an issue on GitHub
-- Contact the project maintainer at: [https://sunflowers.online]
+MIT — see [LICENSE](LICENSE).

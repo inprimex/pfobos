@@ -111,7 +111,7 @@ function spectrumInit() {
   spectrumCanvas.height = spectrumCanvas.offsetHeight || 180;
 }
 
-function spectrumUpdate(freqs, powerDb) {
+function spectrumUpdate(freqs, powerDb, centerFreq) {
   const W = spectrumCanvas.width;
   const H = spectrumCanvas.height;
   const PAD_L = 42, PAD_B = 20, PAD_T = 8;
@@ -149,7 +149,8 @@ function spectrumUpdate(freqs, powerDb) {
     const idx = Math.floor((t / xTicks) * (n - 1));
     const x   = PAD_L + (idx / (n - 1)) * plotW;
     const hz  = freqs[idx];
-    spectrumCtx.fillText((hz / 1e3).toFixed(0) + "k", x, H - 4);
+    const absHz = (centerFreq || 0) + hz;
+    spectrumCtx.fillText((absHz / 1e6).toFixed(2) + "M", x, H - 4);
   }
 
   // Spectrum line + fill
@@ -245,7 +246,7 @@ async function handleFrame(frame) {
     }
   }
 
-  spectrumUpdate(freqs, spectrum);
+  spectrumUpdate(freqs, spectrum, frame.center_freq);
   waterfallDrawRow(frame.waterfall_row);
   constellDraw(iqRaw || []);
 

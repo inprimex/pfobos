@@ -196,7 +196,7 @@ python run_setup.py               # verifies environment
 
 USB access requires udev rules or running as root. WSL2 needs `usbipd` to forward USB.
 
-## WebUI ()
+## WebUI (`webui/`)
 
 Browser-based SDR spectrum viewer — works with stub (no hardware) and real device.
 
