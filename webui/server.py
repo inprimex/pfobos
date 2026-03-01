@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 def create_app(lib_path: str = None) -> FastAPI:
     # Shared asyncio queue — sdr_worker pushes, WebSocket handlers pop
-    frame_queue = asyncio.Queue(maxsize=4)
+    frame_queue = asyncio.Queue(maxsize=8)
     worker_ref = [None]  # mutable cell so lifespan closure can write it
     connected_clients = []
 

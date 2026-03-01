@@ -132,6 +132,18 @@ class SDRWorker:
     # Public API
     # ------------------------------------------------------------------
 
+    def _enqueue(self, frame: dict):
+        """Called from the event loop thread. Drops oldest frame if full."""
+        if self._queue.full():
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+        try:
+            self._queue.put_nowait(frame)
+        except asyncio.QueueFull:
+            pass
+
     def start(self):
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._run, daemon=True, name="sdr-worker")
@@ -180,7 +192,8 @@ class SDRWorker:
                     continue
 
                 frame = self._compute_frame(iq)
-                asyncio.run_coroutine_threadsafe(self._queue.put(frame), self._loop)
+                # Schedule non-blocking put in the event loop — never blocks the worker thread
+                self._loop.call_soon_threadsafe(self._enqueue, frame)
 
         except Exception as e:
             logger.exception("SDRWorker: fatal error: %s", e)
