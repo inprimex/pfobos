@@ -103,8 +103,7 @@ python -m fmreceiver.fobos_fm_receiver -f 95.5 -g 12
 
 - `fmreceiver/fobos_fm_receiver_paplay.py` imports from `fobos_wrapper` (old name) instead of `shared.fwrapper`
 - `stop_rx_async` has a 5s timeout + polling loop; can block on USB cancel
-- `read_rx_sync` copies buffer element-by-element (Python loop) — slow for large buffers; candidate for `np.frombuffer`
-- Multiple legacy `stop_rx_async_*` variants remain in fwrapper.py
+- `read_rx_sync` and async callbacks use `np.frombuffer(ffi.buffer(...)).copy()` for fast C→numpy transfer
 - `rtanalyzer.py` saves to `spectrum_plots/` directory (excluded from git)
 
 ## Package Manager: uv
