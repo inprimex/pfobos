@@ -98,57 +98,78 @@ function constellDraw(iqInterleaved) {
 }
 
 // ---------------------------------------------------------------------------
-// Chart.js: Spectrum
+// Canvas 2D: Spectrum (replaces Chart.js to avoid axis drift / fill artefacts)
 // ---------------------------------------------------------------------------
 const spectrumCanvas = document.getElementById("spectrumCanvas");
-let spectrumChart = null;
+const spectrumCtx    = spectrumCanvas.getContext("2d");
+
+const DB_MIN = -80;
+const DB_MAX = -10;
 
 function spectrumInit() {
-  spectrumChart = new Chart(spectrumCanvas, {
-    type: "line",
-    data: {
-      labels: [],
-      datasets: [{
-        label: "Power (dB)",
-        data: [],
-        borderColor: "#388bfd",
-        borderWidth: 1,
-        pointRadius: 0,
-        fill: true,
-        backgroundColor: "rgba(56,139,253,0.08)",
-        tension: 0.1,
-      }],
-    },
-    options: {
-      animation: false,
-      responsive: true,
-      maintainAspectRatio: false,
-      scales: {
-        x: {
-          ticks: { color: "#8b949e", maxTicksLimit: 10,
-            callback: (val, idx, ticks) => {
-              const f = spectrumChart.data.labels[idx];
-              return f !== undefined ? (f / 1e3).toFixed(0) + " k" : "";
-            }
-          },
-          grid: { color: "#21262d" },
-        },
-        y: {
-          min: -80, max: -10,
-          ticks: { color: "#8b949e", callback: v => v + " dB" },
-          grid: { color: "#21262d" },
-        },
-      },
-      plugins: { legend: { display: false } },
-    },
-  });
+  spectrumCanvas.width  = spectrumCanvas.offsetWidth  || 1200;
+  spectrumCanvas.height = spectrumCanvas.offsetHeight || 180;
 }
 
 function spectrumUpdate(freqs, powerDb) {
-  if (!spectrumChart) return;
-  spectrumChart.data.labels   = freqs;
-  spectrumChart.data.datasets[0].data = powerDb;
-  spectrumChart.update("none");
+  const W = spectrumCanvas.width;
+  const H = spectrumCanvas.height;
+  const PAD_L = 42, PAD_B = 20, PAD_T = 8;
+  const plotW = W - PAD_L;
+  const plotH = H - PAD_B - PAD_T;
+
+  spectrumCtx.fillStyle = "#0d1117";
+  spectrumCtx.fillRect(0, 0, W, H);
+
+  const n = powerDb.length;
+  if (n < 2) return;
+
+  // Grid lines & Y labels
+  spectrumCtx.strokeStyle = "#21262d";
+  spectrumCtx.lineWidth   = 1;
+  spectrumCtx.fillStyle   = "#8b949e";
+  spectrumCtx.font        = "11px monospace";
+  spectrumCtx.textAlign   = "right";
+  const ySteps = [-80, -70, -60, -50, -40, -30, -20, -10];
+  for (const db of ySteps) {
+    if (db < DB_MIN || db > DB_MAX) continue;
+    const y = PAD_T + plotH * (1 - (db - DB_MIN) / (DB_MAX - DB_MIN));
+    spectrumCtx.beginPath();
+    spectrumCtx.moveTo(PAD_L, y);
+    spectrumCtx.lineTo(W, y);
+    spectrumCtx.stroke();
+    spectrumCtx.fillText(db + " dB", PAD_L - 4, y + 4);
+  }
+
+  // X tick labels (frequency)
+  spectrumCtx.textAlign = "center";
+  spectrumCtx.fillStyle = "#8b949e";
+  const xTicks = 8;
+  for (let t = 0; t <= xTicks; t++) {
+    const idx = Math.floor((t / xTicks) * (n - 1));
+    const x   = PAD_L + (idx / (n - 1)) * plotW;
+    const hz  = freqs[idx];
+    spectrumCtx.fillText((hz / 1e3).toFixed(0) + "k", x, H - 4);
+  }
+
+  // Spectrum line + fill
+  spectrumCtx.beginPath();
+  for (let i = 0; i < n; i++) {
+    const x  = PAD_L + (i / (n - 1)) * plotW;
+    const db = Math.max(DB_MIN, Math.min(DB_MAX, powerDb[i]));
+    const y  = PAD_T + plotH * (1 - (db - DB_MIN) / (DB_MAX - DB_MIN));
+    if (i === 0) spectrumCtx.moveTo(x, y);
+    else         spectrumCtx.lineTo(x, y);
+  }
+  // Fill down to bottom of plot
+  spectrumCtx.lineTo(PAD_L + plotW, PAD_T + plotH);
+  spectrumCtx.lineTo(PAD_L,         PAD_T + plotH);
+  spectrumCtx.closePath();
+  spectrumCtx.fillStyle   = "rgba(56,139,253,0.12)";
+  spectrumCtx.fill();
+  spectrumCtx.strokeStyle = "#388bfd";
+  spectrumCtx.lineWidth   = 1.5;
+  spectrumCtx.stroke();
 }
 
 // ---------------------------------------------------------------------------
@@ -308,9 +329,17 @@ fetch("/api/config").then(r => r.json()).then(cfg => {
 // ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
-window.addEventListener("load", () => {
+function initAll() {
   waterfallInit();
   constellInit();
   spectrumInit();
+}
+
+window.addEventListener("load", () => {
+  initAll();
   connect();
+});
+
+window.addEventListener("resize", () => {
+  initAll();
 });
