@@ -1,0 +1,25 @@
+# Normalize line endings: store LF in repo, let OS handle checkout
+* text=auto eol=lf
+
+# Explicitly LF for all text/code files
+*.py    text eol=lf
+*.sh    text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
+*.cfg   text eol=lf
+*.ini   text eol=lf
+*.toml  text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.json  text eol=lf
+
+# Binary files — no conversion
+*.dll   binary
+*.so    binary
+*.dylib binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
