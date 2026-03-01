@@ -31,6 +31,20 @@ pfobos/
 │   │   ├── build.py              # gcc build script → libfobos.so
 │   │   └── .gitignore            # excludes libfobos.so (built artifact)
 │   └── __main__.py               # python -m tests entry point
+├── webui/                    # Web-based spectrum viewer (FastAPI + WebSocket)
+│   ├── server.py             # FastAPI app: REST + WebSocket /ws
+│   ├── sdr_worker.py         # Background IQ reader + FFT → asyncio queue
+│   ├── static/
+│   │   ├── index.html        # SPA: spectrum, waterfall, IQ constellation
+│   │   └── app.js            # WebSocket client + Chart.js + WebFFT
+│   └── __main__.py
+├── webui/                    # Web-based spectrum viewer (FastAPI + WebSocket)
+│   ├── server.py             # FastAPI app: REST + WebSocket /ws
+│   ├── sdr_worker.py         # Background IQ reader + FFT → asyncio queue
+│   ├── static/
+│   │   ├── index.html        # SPA: spectrum, waterfall, IQ constellation
+│   │   └── app.js            # WebSocket client + Chart.js + WebFFT
+│   └── __main__.py
 ├── scripts/                  # Dev/debug helper scripts
 ├── setup/setup-fobos-sdr.sh  # udev rules setup (Linux)
 ├── doc/                      # Markdown docs per component
@@ -188,3 +202,27 @@ python run_setup.py               # verifies environment
 ```
 
 USB access requires udev rules or running as root. WSL2 needs `usbipd` to forward USB.
+
+## WebUI ()
+
+Browser-based SDR spectrum viewer — works with stub (no hardware) and real device.
+
+**Run:**
+```bash
+uv sync --extra webui                              # install FastAPI + uvicorn
+uv run python -m webui.server --stub               # stub mode, http://localhost:8000
+uv run python -m webui.server --host 0.0.0.0       # accessible from Windows browser
+```
+
+**Endpoints:**
+- `GET /` — SPA frontend
+- `WS /ws` — live spectrum frames (JSON: freqs, spectrum, waterfall_row, iq_raw)
+- `GET /api/config` — current SDR config
+- `POST /api/config` — update center_freq, sample_rate, lna_gain, vga_gain, fft_size
+- `GET /api/devices` — enumerate connected devices
+
+**Frontend visualisations (CDN, no build step):**
+- Spectrum: Chart.js line chart (dB vs Hz)
+- Waterfall: Canvas 2D heatmap (plasma colormap, scrolling)
+- IQ Constellation: Canvas 2D scatter (last 2048 IQ pairs)
+- WebFFT: client-side FFT via webfft npm package (toggle on/off)

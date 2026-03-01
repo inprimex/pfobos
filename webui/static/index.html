@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Pfobos SDR — WebUI</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css"/>
+  <style>
+    body { background: #0d1117; color: #e6edf3; }
+    .panel { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; }
+    .panel h6 { color: #8b949e; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 8px; }
+    canvas { width: 100%; display: block; }
+    #statusBar { font-size: 0.8rem; color: #8b949e; }
+    .badge-connected    { background: #238636; }
+    .badge-disconnected { background: #b62324; }
+    .form-control, .form-select {
+      background: #0d1117; color: #e6edf3; border-color: #30363d; font-size: 0.85rem;
+    }
+    .form-control:focus { background: #0d1117; color: #e6edf3; border-color: #388bfd; box-shadow: none; }
+    label { font-size: 0.8rem; color: #8b949e; }
+    #spectrumCanvas { height: 180px; }
+    #waterfallCanvas { height: 200px; }
+    #constellationCanvas { height: 200px; }
+  </style>
+</head>
+<body>
+
+<div class="container-fluid py-3">
+
+  <!-- Header -->
+  <div class="d-flex align-items-center mb-3 gap-3">
+    <h5 class="mb-0">📡 Pfobos SDR WebUI</h5>
+    <span id="statusBadge" class="badge badge-disconnected px-2 py-1">Disconnected</span>
+    <span id="statusBar" class="ms-2">—</span>
+  </div>
+
+  <!-- Controls row -->
+  <div class="panel mb-3">
+    <div class="row g-2 align-items-end">
+      <div class="col-auto">
+        <label>Center Freq (MHz)</label>
+        <input id="cfgFreq" type="number" class="form-control" style="width:130px" step="0.1" value="100"/>
+      </div>
+      <div class="col-auto">
+        <label>Sample Rate (Msps)</label>
+        <input id="cfgRate" type="number" class="form-control" style="width:130px" step="0.1" value="2.048"/>
+      </div>
+      <div class="col-auto">
+        <label>LNA Gain (0–2)</label>
+        <input id="cfgLna" type="number" class="form-control" style="width:90px" min="0" max="2" value="1"/>
+      </div>
+      <div class="col-auto">
+        <label>VGA Gain (0–15)</label>
+        <input id="cfgVga" type="number" class="form-control" style="width:90px" min="0" max="15" value="10"/>
+      </div>
+      <div class="col-auto">
+        <label>FFT Size</label>
+        <select id="cfgFft" class="form-select" style="width:110px">
+          <option value="256">256</option>
+          <option value="512">512</option>
+          <option value="1024" selected>1024</option>
+          <option value="2048">2048</option>
+          <option value="4096">4096</option>
+        </select>
+      </div>
+      <div class="col-auto">
+        <label>&nbsp;</label>
+        <button id="btnApply" class="btn btn-sm btn-primary d-block">Apply</button>
+      </div>
+      <div class="col-auto ms-auto">
+        <label>WebFFT</label>
+        <div class="form-check form-switch mt-1">
+          <input class="form-check-input" type="checkbox" id="toggleWebFFT" checked/>
+          <label class="form-check-label" for="toggleWebFFT">client-side FFT</label>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Visualisations -->
+  <div class="row g-3 mb-3">
+    <!-- Spectrum -->
+    <div class="col-12">
+      <div class="panel">
+        <h6>Spectrum</h6>
+        <canvas id="spectrumCanvas" height="180"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <div class="row g-3">
+    <!-- Waterfall -->
+    <div class="col-md-8">
+      <div class="panel">
+        <h6>Waterfall</h6>
+        <canvas id="waterfallCanvas" height="200"></canvas>
+      </div>
+    </div>
+    <!-- IQ Constellation -->
+    <div class="col-md-4">
+      <div class="panel">
+        <h6>IQ Constellation</h6>
+        <canvas id="constellationCanvas" height="200"></canvas>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Chart.js -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<!-- WebFFT from CDN -->
+<script src="https://cdn.jsdelivr.net/npm/webfft@0.0.15/dist/webfft.min.js"></script>
+<!-- App logic -->
+<script src="/static/app.js"></script>
+</body>
+</html>
