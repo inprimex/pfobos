@@ -1,0 +1,23 @@
+{
+    "sample_rate": 2048000,
+    "signals": [
+        {
+            "type": "noise",
+            "amplitude": 0.05,
+            "_comment": "Background white noise floor"
+        },
+        {
+            "type": "fm",
+            "audio_hz": 1000,
+            "deviation": 75000,
+            "amplitude": 0.8,
+            "_comment": "FM-modulated 1 kHz audio tone — demod should recover 1 kHz sine"
+        },
+        {
+            "type": "tone",
+            "freq_hz": 100000,
+            "amplitude": 0.3,
+            "_comment": "Pure IQ tone at 100 kHz — FFT should show a peak at this bin"
+        }
+    ]
+}

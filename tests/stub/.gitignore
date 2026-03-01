@@ -1,0 +1,3 @@
+# Compiled stub library — built locally, not committed
+*.so
+__pycache__/

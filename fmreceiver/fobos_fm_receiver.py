@@ -12,7 +12,12 @@ Requirements:
 
 import numpy as np
 from scipy import signal
-import sounddevice as sd
+try:
+    import sounddevice as sd
+    SOUNDDEVICE_AVAILABLE = True
+except ImportError:
+    sd = None
+    SOUNDDEVICE_AVAILABLE = False
 import threading
 import time
 import argparse
@@ -21,7 +26,7 @@ import os
 import signal as sig
 from queue import Queue
 import subprocess
-from fobos_wrapper import FobosSDR, FobosException
+from shared.fwrapper import FobosSDR, FobosException
 
 # Try to import pulsectl (optional)
 try:

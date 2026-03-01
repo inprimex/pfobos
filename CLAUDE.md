@@ -18,13 +18,19 @@ pfobos/
 │   ├── fobos_fm_receiver.py         # FM demodulation + sounddevice audio
 │   └── fobos_fm_receiver_paplay.py  # FM receiver via PulseAudio (paplay)
 ├── tests/
-│   ├── test_mock_fobos.py    # Unit tests — no hardware required (uses unittest.mock)
-│   ├── test_wrapper_logic.py # Wrapper logic / error-handling tests
-│   ├── test_integration.py   # Hardware integration tests (requires device)
-│   ├── test_performance.py   # Performance / timing tests (requires device)
-│   ├── benchmark.py          # Detailed benchmark tool (FobosSDRBenchmark class)
-│   ├── benchmark_analyze.py  # Plot/compare saved benchmark results
-│   └── __main__.py           # python -m tests entry point
+│   ├── test_mock_fobos.py        # Unit tests — no hardware (uses unittest.mock)
+│   ├── test_wrapper_logic.py     # Wrapper logic / error-handling tests
+│   ├── test_stub_integration.py  # End-to-end tests via C stub library (no hardware)
+│   ├── test_integration.py       # Hardware integration tests (requires device)
+│   ├── test_performance.py       # Performance / timing tests (requires device)
+│   ├── benchmark.py              # Detailed benchmark tool (FobosSDRBenchmark class)
+│   ├── benchmark_analyze.py      # Plot/compare saved benchmark results
+│   ├── stub/                     # C stub library for hardware-free testing
+│   │   ├── libfobos_stub.c       # All 16 fobos_rx_* API functions
+│   │   ├── signals.json          # Signal config (noise, tone, FM)
+│   │   ├── build.py              # gcc build script → libfobos.so
+│   │   └── .gitignore            # excludes libfobos.so (built artifact)
+│   └── __main__.py               # python -m tests entry point
 ├── scripts/                  # Dev/debug helper scripts
 ├── setup/setup-fobos-sdr.sh  # udev rules setup (Linux)
 ├── doc/                      # Markdown docs per component
@@ -73,15 +79,54 @@ sdr.stop_rx_async()
 ## Running Tests
 
 ```bash
-python run_tests.py                      # mock + logic tests (no hardware)
-python run_tests.py --verbose
-python run_tests.py --integration        # requires hardware
-python run_tests.py --performance-only   # requires hardware
-python run_tests.py --benchmark          # benchmark tool
-python -m tests                          # alternative entry point
+# No-hardware tests
+uv run python run_tests.py               # mock + logic tests
+uv run python run_tests.py --verbose
+
+# Stub integration tests (no hardware — builds C stub first)
+uv run python tests/stub/build.py        # compile tests/stub/libfobos.so
+uv run pytest tests/test_stub_integration.py -v  # 25 tests
+
+# Hardware tests
+uv run python run_tests.py --integration        # requires device
+uv run python run_tests.py --performance-only   # requires device
+uv run python run_tests.py --benchmark
 ```
 
 Default timeout: 30s per test. Hardware tests skip automatically when device absent.
+
+## Stub Library (`tests/stub/`)
+
+A real compiled C `.so` loaded via CFFI — no mocks — for end-to-end testing without hardware.
+
+**Build:**
+```bash
+uv run python tests/stub/build.py   # produces tests/stub/libfobos.so
+```
+
+**Usage:**
+```python
+from shared.fwrapper import FobosSDR
+sdr = FobosSDR(lib_path="tests/stub/libfobos.so")
+```
+
+**Signal configuration** (`tests/stub/signals.json`):
+```json
+{ "signals": [
+    {"type": "noise",  "amplitude": 0.05},
+    {"type": "fm",     "audio_hz": 1000, "deviation": 75000, "amplitude": 0.8},
+    {"type": "tone",   "freq_hz": 100000, "amplitude": 0.3}
+]}
+```
+Override path via env var: `FOBOS_STUB_SIGNALS=/path/to/signals.json`
+
+**What the stub covers:**
+- CFFI loading and all 16 API functions
+- Synchronous and asynchronous IQ reception (configurable count)
+- FFT peak detection with a known tone frequency
+- FM demodulation DSP pipeline
+
+**Isolation from production:** The stub `.so` is a gitignored build artifact; `FobosSDR()` with no `lib_path` always uses system library discovery unchanged.
 
 ## Running Applications
 

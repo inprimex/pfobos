@@ -36,8 +36,9 @@ class FobosException(Exception):
 class FobosSDR:
     """Python wrapper for Fobos SDR library."""
     
-    def __init__(self):
+    def __init__(self, lib_path: str = None):
         self.ffi = FFI()
+        self._lib_path_override = lib_path
         self._define_ffi_interface()
         self._load_library()
         self.dev = None
@@ -82,6 +83,14 @@ class FobosSDR:
 
     def _load_library(self):
         """Load the Fobos SDR library based on the current platform."""
+        # Explicit path override — used for testing with stub library
+        if self._lib_path_override:
+            try:
+                self.lib = self.ffi.dlopen(self._lib_path_override)
+                return
+            except OSError as e:
+                raise OSError(f"Could not load Fobos SDR library from '{self._lib_path_override}': {e}")
+
         if sys.platform.startswith('win'):
             lib_name = 'fobos.dll'
         elif sys.platform.startswith('linux'):
@@ -90,12 +99,11 @@ class FobosSDR:
             lib_name = 'libfobos.dylib'
         else:
             raise OSError(f"Unsupported platform: {sys.platform}")
-        
-        # Try to locate the library
+
+        # Try system path first, then the shared/ directory alongside this file
         try:
             self.lib = self.ffi.dlopen(lib_name)
         except OSError:
-            # Try current directory if not in path
             current_dir = os.path.dirname(os.path.abspath(__file__))
             lib_path = os.path.join(current_dir, lib_name)
             try:
