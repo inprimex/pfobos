@@ -245,10 +245,10 @@ class FobosSDR:
                 if buffer_size <= 0:
                     return
                 
-                # Create a numpy array and copy data from the CFFI buffer
-                buffer = np.zeros(buffer_size, dtype=np.float32)
-                for i in range(buffer_size):
-                    buffer[i] = self.ffi.cast("float *", buf)[i]
+                # Copy C buffer into numpy array via memoryview (avoids Python loop)
+                buffer = np.frombuffer(
+                    self.ffi.buffer(buf, buffer_size * 4), dtype=np.float32
+                ).copy()
                 
                 # Make sure buffer length is even for complex conversion
                 if len(buffer) % 2 != 0:
@@ -304,15 +304,15 @@ class FobosSDR:
                 if buf_length <= 0:
                     return
                 
-                # Create a numpy array and copy data from the CFFI buffer with bounds checking
-                buffer = np.zeros(buf_length, dtype=np.float32)
-                for i in range(min(buf_length, len(buffer))):
-                    buffer[i] = self.ffi.cast("float *", buf)[i]
-                
+                # Copy C buffer into numpy array via memoryview (avoids Python loop)
+                buffer = np.frombuffer(
+                    self.ffi.buffer(buf, buf_length * 4), dtype=np.float32
+                ).copy()
+
                 # Make sure buffer length is even for complex conversion
                 if len(buffer) % 2 != 0:
                     buffer = buffer[:-1]
-                    
+
                 # Reshape the buffer to complex IQ samples (I and Q are interleaved)
                 iq_samples = buffer[0::2] + 1j * buffer[1::2]
                 
@@ -553,12 +553,12 @@ class FobosSDR:
             if actual_len > self._buffer_length * 2:
                 # Sanity check - shouldn't happen if C library is behaving
                 actual_len = self._buffer_length * 2
-            
-            # Copy data to numpy array - safer than using fromiter
-            buffer = np.zeros(actual_len, dtype=np.float32)
-            for i in range(actual_len):
-                buffer[i] = self._buffer_ptr[i]
-            
+
+            # Copy C buffer into numpy array via memoryview (avoids Python loop)
+            buffer = np.frombuffer(
+                self.ffi.buffer(self._buffer_ptr, actual_len * 4), dtype=np.float32
+            ).copy()
+
             # Make sure length is even for complex conversion
             if len(buffer) % 2 != 0:
                 buffer = buffer[:-1]

@@ -108,10 +108,16 @@ class TestMockFobos(unittest.TestCase):
                 return MagicMock()
                 
         self.mock_ffi_instance.new.side_effect = mock_new_side_effect
-        
+
         # Mock string conversion
         self.mock_ffi_instance.string.return_value = b"test_string"
-        
+
+        # Mock ffi.buffer to return real bytes so np.frombuffer works
+        def mock_buffer_side_effect(ptr, size):
+            n_floats = size // 4
+            return np.zeros(n_floats, dtype=np.float32).tobytes()
+        self.mock_ffi_instance.buffer.side_effect = mock_buffer_side_effect
+
         # Create the SDR instance with mocks
         self.sdr = FobosSDR()
 
