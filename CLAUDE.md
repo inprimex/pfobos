@@ -97,7 +97,7 @@ python -m fmreceiver.fobos_fm_receiver -f 95.5 -g 12
 - **Error handling**: Always catch `FobosException`; never swallow in finally (log only)
 - **Buffer sizes**: Must be even (I/Q pairs); minimum 1024 floats
 - **Context manager**: `FobosSDR` supports `with` statement → auto `close()`
-- **Legacy methods**: `start_rx_async_legacy`, `stop_rx_async_legacy*` kept for reference — do not use
+- **No legacy methods**: `start_rx_async_legacy`, `stop_rx_async_legacy*` have been removed
 
 ## Known Issues / Tech Debt
 
