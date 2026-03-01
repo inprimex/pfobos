@@ -12,6 +12,7 @@ import asyncio
 import logging
 import os
 import sys
+from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -34,31 +35,36 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def create_app(lib_path: str = None) -> FastAPI:
-    app = FastAPI(title="Pfobos WebUI", version="0.1.0")
-
     # Shared asyncio queue — sdr_worker pushes, WebSocket handlers pop
-    frame_queue = asyncio.Queue(maxsize=4)  # type: asyncio.Queue
-    worker = None  # type: SDRWorker | None
+    frame_queue = asyncio.Queue(maxsize=4)
+    worker_ref = [None]  # mutable cell so lifespan closure can write it
+    connected_clients = []
 
-    # -----------------------------------------------------------------------
-    # Lifecycle
-    # -----------------------------------------------------------------------
+    async def _broadcaster():
+        """Read frames from the shared queue and broadcast to all WS clients."""
+        while True:
+            frame = await frame_queue.get()
+            dead = []
+            for ws in list(connected_clients):
+                try:
+                    await ws.send_json(frame)
+                except Exception:
+                    dead.append(ws)
+            for ws in dead:
+                if ws in connected_clients:
+                    connected_clients.remove(ws)
 
-    @app.on_event("startup")
-    async def _startup():
-        nonlocal worker
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
         loop = asyncio.get_event_loop()
-        worker = SDRWorker(
-            loop=loop,
-            queue=frame_queue,
-            lib_path=lib_path,
-        )
+        worker = SDRWorker(loop=loop, queue=frame_queue, lib_path=lib_path)
+        worker_ref[0] = worker
         worker.start()
+        asyncio.create_task(_broadcaster())
+        yield
+        worker.stop()
 
-    @app.on_event("shutdown")
-    async def _shutdown():
-        if worker:
-            worker.stop()
+    app = FastAPI(title="Pfobos WebUI", version="0.1.0", lifespan=lifespan)
 
     # -----------------------------------------------------------------------
     # Static files
@@ -76,6 +82,7 @@ def create_app(lib_path: str = None) -> FastAPI:
 
     @app.get("/api/config")
     async def get_config():
+        worker = worker_ref[0]
         if worker is None:
             return {}
         return {
@@ -89,6 +96,7 @@ def create_app(lib_path: str = None) -> FastAPI:
 
     @app.post("/api/config")
     async def post_config(cfg: dict):
+        worker = worker_ref[0]
         if worker:
             worker.apply_config(cfg)
         return {"status": "ok"}
@@ -103,27 +111,8 @@ def create_app(lib_path: str = None) -> FastAPI:
             return {"error": str(e), "devices": [], "count": 0}
 
     # -----------------------------------------------------------------------
-    # WebSocket — one broadcast queue, multiple clients via fan-out
+    # WebSocket — broadcaster pushes to all connected clients
     # -----------------------------------------------------------------------
-
-    connected_clients: list[WebSocket] = []
-
-    async def _broadcaster():
-        """Read frames from the shared queue and broadcast to all WS clients."""
-        while True:
-            frame = await frame_queue.get()
-            dead = []
-            for ws in list(connected_clients):
-                try:
-                    await ws.send_json(frame)
-                except Exception:
-                    dead.append(ws)
-            for ws in dead:
-                connected_clients.remove(ws)
-
-    @app.on_event("startup")
-    async def _start_broadcaster():
-        asyncio.create_task(_broadcaster())
 
     @app.websocket("/ws")
     async def websocket_endpoint(ws: WebSocket):
@@ -132,7 +121,7 @@ def create_app(lib_path: str = None) -> FastAPI:
         logger.info("WebSocket client connected (%d total)", len(connected_clients))
         try:
             while True:
-                # Keep connection alive; actual data pushed by _broadcaster
+                # Keep connection alive; data is pushed by _broadcaster task
                 await ws.receive_text()
         except WebSocketDisconnect:
             pass
@@ -153,7 +142,6 @@ def _parse_args():
     p.add_argument("--stub",   action="store_true", help="Use C stub library instead of real device")
     p.add_argument("--host",   default="127.0.0.1",  help="Bind host (default: 127.0.0.1)")
     p.add_argument("--port",   type=int, default=8000, help="Bind port (default: 8000)")
-    p.add_argument("--reload", action="store_true",  help="Enable uvicorn auto-reload (dev mode)")
     return p.parse_args()
 
 
@@ -169,14 +157,6 @@ if __name__ == "__main__":
     app = create_app(lib_path=lib)
 
     print(f"Starting Pfobos WebUI on http://{args.host}:{args.port}")
-    if args.stub:
-        print("Mode: stub library (synthetic signals)")
-    else:
-        print("Mode: real Fobos SDR device")
+    print(f"Mode: {'stub library (synthetic signals)' if args.stub else 'real Fobos SDR device'}")
 
-    uvicorn.run(
-        app,
-        host=args.host,
-        port=args.port,
-        log_level="info",
-    )
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")

@@ -134,7 +134,7 @@ function spectrumInit() {
           grid: { color: "#21262d" },
         },
         y: {
-          min: -100, max: 0,
+          min: -80, max: -10,
           ticks: { color: "#8b949e", callback: v => v + " dB" },
           grid: { color: "#21262d" },
         },
@@ -179,14 +179,16 @@ function webfftCompute(iqInterleaved) {
   }
 }
 
-function fftOutputToDb(fftOut, n) {
+function fftOutputToDb(fftOut, n, normalize) {
+  const scale = normalize || 1;
   const powerDb = new Array(n);
   for (let i = 0; i < n; i++) {
     const re = fftOut[2 * i];
     const im = fftOut[2 * i + 1];
-    powerDb[i] = 20 * Math.log10(Math.sqrt(re * re + im * im) + 1e-10);
+    // Normalize by FFT size (same as server) so dB range is consistent
+    powerDb[i] = 20 * Math.log10(Math.sqrt(re * re + im * im) / scale + 1e-10);
   }
-  // fftshift
+  // fftshift: move DC from bin 0 to center
   const half = n >> 1;
   return [...powerDb.slice(half), ...powerDb.slice(0, half)];
 }
@@ -210,12 +212,14 @@ async function handleFrame(frame) {
   let spectrum = frame.spectrum;
 
   if (useWebFFT && iqRaw && iqRaw.length >= 2) {
-    const n = iqRaw.length >> 1;   // number of IQ pairs = FFT size
-    await initWebFFT(n * 2);       // WebFFT size = interleaved float count
+    // iq_raw is interleaved float32: length = 2 * n_iq_pairs
+    // WebFFT constructor takes FFT size = number of IQ pairs
+    const n = iqRaw.length >> 1;   // number of IQ pairs
+    await initWebFFT(n);           // WebFFT(fftSize) — NOT n*2
 
     const fftOut = webfftCompute(iqRaw);
     if (fftOut) {
-      spectrum = fftOutputToDb(fftOut, n);
+      spectrum = fftOutputToDb(fftOut, n, n);
       freqs    = makeFreqs(n, frame.sample_rate);
     }
   }

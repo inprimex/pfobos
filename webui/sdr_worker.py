@@ -222,12 +222,14 @@ class SDRWorker:
         n = min(len(iq), self.fft_size)
         window = np.hanning(n)
         fft_out = np.fft.fftshift(np.fft.fft(iq[:n] * window, n))
-        power_db = 20.0 * np.log10(np.abs(fft_out) + 1e-10)
+        # Normalize by FFT size so amplitude is independent of n
+        power_db = 20.0 * np.log10(np.abs(fft_out) / n + 1e-10)
 
         freqs = np.fft.fftshift(np.fft.fftfreq(n, d=1.0 / self.sample_rate)).tolist()
 
-        # Raw IQ for WebFFT / constellation — interleaved float32, capped at IQ_RAW_MAX pairs
-        raw_len = min(len(iq), self.IQ_RAW_MAX)
+        # Raw IQ for WebFFT: send exactly fft_size pairs so WebFFT uses same N as server FFT
+        # Also used for IQ constellation (first 2048 pairs max)
+        raw_len = n  # n == fft_size (already capped above)
         iq_raw = np.empty(raw_len * 2, dtype=np.float32)
         iq_raw[0::2] = iq[:raw_len].real
         iq_raw[1::2] = iq[:raw_len].imag
