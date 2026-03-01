@@ -107,18 +107,34 @@ python -m fmreceiver.fobos_fm_receiver -f 95.5 -g 12
 - Multiple legacy `stop_rx_async_*` variants remain in fwrapper.py
 - `rtanalyzer.py` saves to `spectrum_plots/` directory (excluded from git)
 
+## Package Manager: uv
+
+This project uses [uv](https://docs.astral.sh/uv/) for dependency management.
+
+```bash
+uv sync                  # install all dependencies (creates .venv)
+uv sync --extra audio    # also install sounddevice + pulsectl
+uv run python run_tests.py        # run with managed environment
+uv run python run_rtanalyzer.py   # run spectrum analyzer
+uv add <package>         # add a new dependency
+```
+
+`uv.lock` is committed — ensures reproducible installs on all machines.
+`.venv/` is gitignored — recreated locally by `uv sync`.
+
 ## Dependencies
 
-| Package    | Purpose                          |
-|------------|----------------------------------|
-| numpy      | IQ array processing              |
-| scipy      | Signal processing (FM demod, FFT windows) |
-| matplotlib | Spectrum visualisation (TkAgg)   |
-| cffi       | C library FFI bindings           |
-| pandas     | Benchmark result analysis        |
-| tabulate   | Benchmark result formatting      |
-| sounddevice| Audio output (FM receiver)       |
-| pulsectl   | PulseAudio control (optional)    |
+| Package    | Group    | Purpose                               |
+|------------|----------|---------------------------------------|
+| numpy      | core     | IQ array processing                   |
+| scipy      | core     | Signal processing (FM demod, FFT windows) |
+| matplotlib | core     | Spectrum visualisation (TkAgg)        |
+| cffi       | core     | C library FFI bindings                |
+| pandas     | core     | Benchmark result analysis             |
+| tabulate   | core     | Benchmark result formatting           |
+| sounddevice| audio    | Audio output (FM receiver)            |
+| pulsectl   | audio    | PulseAudio control (optional)         |
+| pytest     | dev      | Test runner                           |
 
 ## Hardware Setup (Linux)
 

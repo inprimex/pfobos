@@ -173,6 +173,9 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 
+# uv
+.venv/
+
 # personal project artifacts
 TODO.MD
 
