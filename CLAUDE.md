@@ -36,14 +36,7 @@ pfobos/
 │   ├── sdr_worker.py         # Background IQ reader + FFT → asyncio queue
 │   ├── static/
 │   │   ├── index.html        # SPA: spectrum, waterfall, IQ constellation
-│   │   └── app.js            # WebSocket client + Chart.js + WebFFT
-│   └── __main__.py
-├── webui/                    # Web-based spectrum viewer (FastAPI + WebSocket)
-│   ├── server.py             # FastAPI app: REST + WebSocket /ws
-│   ├── sdr_worker.py         # Background IQ reader + FFT → asyncio queue
-│   ├── static/
-│   │   ├── index.html        # SPA: spectrum, waterfall, IQ constellation
-│   │   └── app.js            # WebSocket client + Chart.js + WebFFT
+│   │   └── app.js            # WebSocket client + Canvas 2D + WebFFT
 │   └── __main__.py
 ├── scripts/                  # Dev/debug helper scripts
 ├── setup/setup-fobos-sdr.sh  # udev rules setup (Linux)
@@ -222,7 +215,7 @@ uv run python -m webui.server --host 0.0.0.0       # accessible from Windows bro
 - `GET /api/devices` — enumerate connected devices
 
 **Frontend visualisations (CDN, no build step):**
-- Spectrum: Chart.js line chart (dB vs Hz)
+- Spectrum: Canvas 2D line chart (dB vs Hz, no external deps)
 - Waterfall: Canvas 2D heatmap (plasma colormap, scrolling)
 - IQ Constellation: Canvas 2D scatter (last 2048 IQ pairs)
 - WebFFT: client-side FFT via webfft npm package (toggle on/off)
