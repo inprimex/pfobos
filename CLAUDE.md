@@ -219,3 +219,109 @@ uv run python -m webui.server --host 0.0.0.0       # accessible from Windows bro
 - Waterfall: Canvas 2D heatmap (plasma colormap, scrolling)
 - IQ Constellation: Canvas 2D scatter (last 2048 IQ pairs)
 - WebFFT: client-side FFT via webfft npm package (toggle on/off)
+
+
+<!-- maestro:begin -->
+## Maestro Orchestration Rules
+
+**You are `hardware-agent`**. You own this repository: **pfobos**.
+
+Maestro folder: `../watchtower-otaman/` (contains `.agents/`, `platform.yaml`, bus messages)
+
+### First Session Checklist
+1. Run `maestro check` (Bash) — see pending bus messages and blocked tasks. The CLI auto-detects project root, your agent identity, and ack status. No MCP tool-loading needed for this hot path; pre-allowed in `.claude/settings.local.json`.
+2. Read `../watchtower-otaman/.agents/queue/hardware-agent.md` — see your active/queued/blocked tasks
+3. Read specs relevant to your repo (specs_dir paths below)
+4. Run `git log --oneline -10` — understand recent changes
+5. If `../watchtower-otaman/.agents/knowledge/` exists, check for tech docs relevant to your work
+6. Then: resume active task, or pick highest-priority queued task, or act on bus messages
+
+### Ownership
+- This repo (`../pfobos`) is YOURS — you may read and write freely here
+- Other repos (READ-ONLY, do not write to them):
+  - detectmod (../detectmod) — owned by **classification-agent** (READ-ONLY)
+  - watchtower-edge (../watchtower-edge) — owned by **embedded-agent** (READ-ONLY)
+  - watchtower-sdr-probe (../watchtower-sdr-probe) — owned by **probe-agent** (READ-ONLY)
+  - watchtower-fusion (../watchtower-fusion) — owned by **fusion-agent** (READ-ONLY)
+  - watchtower-specs (../watchtower-specs) — owned by **spec-agent** (READ-ONLY)
+  - watchtower-synthetic (../watchtower-synthetic) — owned by **synthetic-agent** (READ-ONLY)
+  - watchtower-synthetic-ui (../watchtower-synthetic-ui) — owned by **synthetic-agent** (READ-ONLY)
+  - watchtower-tactiq (../watchtower-tactiq) — owned by **tactiq-agent** (READ-ONLY)
+  - watchtower-e2e (../watchtower-e2e) — owned by **e2e-agent** (READ-ONLY)
+  - watchtower-train (../watchtower-train) — owned by **train-agent** (READ-ONLY)
+  - watchtower-features (../watchtower-features) — owned by **train-agent** (READ-ONLY)
+  - watchtower-citadel (../watchtower-citadel) — owned by **citadel-agent** (READ-ONLY)
+  - watchtower-grants (../watchtower-grants) — owned by **grants-agent** (READ-ONLY)
+- You may read other repos' source code, configs, and CLAUDE.md to understand their APIs
+- If you need a change in another repo, send a `task-assignment` or `question` message to its owner
+
+### Communication — Bash CLI for hot path, MCP for richer ops
+
+Hot-path commands (frequent, read-mostly) — use the `maestro` Bash CLI, pre-allowed in this repo's settings:
+- `maestro check` — list pending messages for you (auto-detects identity)
+- `maestro ack <msg-stem>` — acknowledge a message (default: resolved; `--read` keeps it visible)
+- `maestro status` — project-wide summary
+- `maestro queue` — your task queue
+- `maestro blocked` — your blocked tasks
+
+Richer / less-frequent ops — use MCP tools (load schemas with ToolSearch first when calling directly):
+- `maestro_send(cwd, to, subject, body)` — send a message to another agent
+- `maestro_read_message(cwd, message_stem)` — read full message content programmatically
+- `maestro_propose(cwd, title, what_needs_to_change, why_needed)` — propose a spec change
+- `maestro_complete(cwd, change_name, tasks)` — report task completion
+- `maestro_read_spec(cwd, spec_path)` — read spec files
+- `maestro_list_agents(cwd)`, `maestro_set_agent(cwd, name)`, `maestro_cleanup(cwd)` — agent registry / housekeeping
+
+Why the split: bus checks happen dozens of times per session, and the MCP-via-instruction path proved unreliable across model variants (2026-04-29 incident — see plugin CLAUDE.md). The Bash CLI is deterministic. Heavier write operations stay on MCP because their structured payload is worth the schema-load overhead.
+
+### Bus Awareness (CRITICAL)
+- **Check the bus proactively** — do NOT wait for the human to tell you:
+  - After completing each task (feature done, test passing)
+  - Before starting a new task from your queue
+  - When idle or waiting for anything
+  - After every 3-5 tool calls during active work
+- **Never let pending messages exceed 3 without acting**
+- When you change an API or shared type: send `contract-change` via `maestro_send` BEFORE committing
+- Message handling while busy: ack as `read`, add to queue, finish current task first
+- Urgent messages: pause current work, inform the human immediately
+
+### Task Queue
+- Your queue file: `../watchtower-otaman/.agents/queue/hardware-agent.md`
+- Max 1 active task at a time — finish or pause before switching
+- When a `task-assignment` arrives while you're busy: ack as `read`, add to Queued section
+- When you finish a task: check bus, then pick highest-priority queued item
+- Urgent messages override: pause active task, handle urgent item
+
+### Task Completion Reporting (CRITICAL)
+- When you finish tasks from a `task-assignment`, you MUST report completion:
+  - `maestro complete <change-name> --tasks "2.1, 2.3"` (specific tasks)
+  - `maestro complete <change-name> --all` (all tasks for that change)
+- This updates `tasks.md` checkboxes in the specs repo and sends a `task-complete` bus message
+- **Lifecycle**: task-assignment received -> ack "read" -> implement -> `maestro complete` -> ack "resolved"
+- NEVER ack a task-assignment as "resolved" without first running `maestro complete`
+
+### Specs (OpenSpec)
+- Specs repo: `../watchtower-specs` (READ-ONLY)
+- Your spec area is not yet mapped — check `../watchtower-specs/openspec/specs/` for relevant folders
+- **Shared contracts**: `../watchtower-specs/openspec/specs/shared-contracts/spec.md` — message schemas, signal classes, security contracts
+- **Active changes for you**: scan `../watchtower-specs/openspec/changes/` for folders whose `tasks.md` references your repo or domain. Read `proposal.md` → `design.md` → `tasks.md` in each.
+- **All accumulated specs**: `../watchtower-specs/openspec/specs/`
+- To propose a spec change, use `/maestro:propose` — do NOT modify specs directly
+
+### Spec Change Rules (CRITICAL)
+- If you discover a missing endpoint, contract gap, or any spec change needed: run `/maestro:propose`, then **STOP** working on that feature
+- **Never implement against a spec that doesn't exist yet** — wait for human approval + spec commit
+- After proposing, switch to other tasks. Run `/maestro:check` periodically to see if your proposal was approved
+- Resume the blocked task only after you see BOTH `spec-change-approved` AND `spec-change` messages
+- Check `../watchtower-otaman/.agents/blocked/hardware-agent.md` for your currently blocked tasks
+
+- **Branching**: gitflow
+- **Commits**: conventional format
+
+
+
+### Git Workflow
+- Work in branches: `agent/hardware-agent/{feature-name}`
+- All changes go through PRs
+- Write clear commit messages for the audit trail
+<!-- maestro:end -->

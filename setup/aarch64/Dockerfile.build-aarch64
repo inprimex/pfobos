@@ -1,0 +1,90 @@
+# syntax=docker/dockerfile:1
+# Build libfobos + libfobos-sdr-agile + SoapyFobosSDR for aarch64 (OrangePi 5 Max / RK3588)
+#
+# Requires: docker buildx with linux/arm64 support (QEMU via binfmt_misc)
+# Usage:    ./setup/aarch64/build-docker.sh
+#
+# Artifact layout (relative to output dir):
+#   lib/libfobos.so*              - Fobos SDR core C library
+#   lib/libfobos_sdr.so*          - Fobos SDR agile API
+#   lib/SoapySDR/modules*/        - SoapyFobosSDR module (FobosSDRSupport.so)
+#   include/fobos.h               - C API header
+#   include/fobos_sdr.h           - agile API header
+#   udev/fobos-sdr.rules          - USB device permissions (VID:PID 16d0:132e)
+#   VERSIONS                      - source revision manifest
+
+FROM --platform=linux/arm64 ubuntu:22.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git \
+        cmake \
+        build-essential \
+        pkg-config \
+        libusb-1.0-0-dev \
+        libsoapysdr-dev \
+        soapysdr-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+# libfobos (core C library, depends on libusb-1.0)
+RUN git clone --depth 1 https://github.com/rigexpert/libfobos.git /src/libfobos
+
+RUN cmake -S /src/libfobos -B /src/libfobos/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+    && cmake --build /src/libfobos/build -j"$(nproc)" \
+    && cmake --install /src/libfobos/build \
+    && ldconfig
+
+# libfobos-sdr-agile (agile sweep API, same USB dependency)
+RUN git clone --depth 1 https://github.com/rigexpert/libfobos-sdr-agile.git /src/libfobos-sdr-agile
+
+RUN cmake -S /src/libfobos-sdr-agile -B /src/libfobos-sdr-agile/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+    && cmake --build /src/libfobos-sdr-agile/build -j"$(nproc)" \
+    && cmake --install /src/libfobos-sdr-agile/build \
+    && ldconfig
+
+# SoapyFobosSDR plugin (links both fobos libs; registered as driver=fobos)
+RUN git clone --depth 1 https://github.com/rigexpert/SoapyFobosSDR.git /src/SoapyFobosSDR
+
+RUN PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/local/lib/aarch64-linux-gnu/pkgconfig \
+    cmake -S /src/SoapyFobosSDR -B /src/SoapyFobosSDR/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_PREFIX_PATH=/usr/local \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+    && cmake --build /src/SoapyFobosSDR/build -j"$(nproc)" \
+    && cmake --install /src/SoapyFobosSDR/build
+
+# Collect artifact into /artifact
+RUN mkdir -p /artifact/lib /artifact/include /artifact/udev \
+    && cp -P /usr/local/lib/libfobos.so* /artifact/lib/ \
+    && cp -P /usr/local/lib/libfobos_sdr.so* /artifact/lib/ \
+    # SoapySDR module — locate wherever cmake installed it
+    && find /usr/local/lib /usr/lib -name "FobosSDRSupport.so" 2>/dev/null | head -1 \
+       | xargs -I{} sh -c \
+           'dir=$(dirname {}); rel=${dir#/usr/local/}; rel=${rel#/usr/}; mkdir -p /artifact/lib/${rel}; cp {} /artifact/lib/${rel}/' \
+    && cp /usr/local/include/fobos.h /artifact/include/ \
+    && cp /usr/local/include/fobos_sdr.h /artifact/include/ \
+    && cp /src/libfobos/fobos-sdr.rules /artifact/udev/ \
+    && ldconfig -n /artifact/lib \
+    # version manifest for reproducibility
+    && printf "libfobos:       %s\n" "$(git -C /src/libfobos rev-parse --short HEAD)" > /artifact/VERSIONS \
+    && printf "libfobos-agile: %s\n" "$(git -C /src/libfobos-sdr-agile rev-parse --short HEAD)" >> /artifact/VERSIONS \
+    && printf "SoapyFobosSDR:  %s\n" "$(git -C /src/SoapyFobosSDR rev-parse --short HEAD)" >> /artifact/VERSIONS \
+    && printf "arch:           linux/arm64\n" >> /artifact/VERSIONS \
+    && printf "soapysdr:       %s\n" "$(dpkg-query -W -f='${Version}' libsoapysdr-dev 2>/dev/null)" >> /artifact/VERSIONS
+
+# Smoke-test: module registers without hardware (driver enumeration, not capture)
+RUN LD_LIBRARY_PATH=/usr/local/lib \
+    SoapySDRUtil --find="driver=fobos" 2>&1 | tee /artifact/soapy-probe.log \
+    && echo "SoapySDR probe complete (no hardware in container is expected)" || true
+
+# Print layout for build log
+RUN echo "=== artifact layout ===" && find /artifact -type f | sort
+
+# Export stage — only the artifact directory
+FROM scratch AS export
+COPY --from=builder /artifact /

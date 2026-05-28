@@ -180,3 +180,6 @@ cython_debug/
 TODO.MD
 
 spectrum_plots/
+
+# Maestro marker file (local pointer to maestro folder)
+.maestro
