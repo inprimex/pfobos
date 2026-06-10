@@ -13,10 +13,9 @@ from scipy import signal
 import time
 import os
 import sys
-# from fobos_wrapper import FobosSDR, FobosException
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from shared.fwrapper import FobosSDR, FobosException
+from pfobos import FobosSDR, FobosException
 
 class EnhancedRealTimeAnalyzer:
     def __init__(self):

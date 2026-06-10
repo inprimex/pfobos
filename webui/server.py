@@ -104,7 +104,7 @@ def create_app(lib_path: str = None) -> FastAPI:
     @app.get("/api/devices")
     async def get_devices():
         try:
-            from shared.fwrapper import FobosSDR
+            from pfobos import FobosSDR
             sdr = FobosSDR(lib_path=lib_path)
             return {"devices": sdr.list_devices(), "count": sdr.get_device_count()}
         except Exception as e:

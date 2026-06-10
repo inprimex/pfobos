@@ -24,8 +24,7 @@ import logging
 
 # Add parent directory to path to import the wrapper
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
-# Import from shared module
-from shared.fwrapper import FobosSDR, FobosException
+from pfobos import FobosSDR, FobosException
 
 
 # Configure logging

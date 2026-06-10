@@ -110,7 +110,7 @@ SoapySDRUtil --probe="driver=fobos" 2>&1 | grep -i "sample"
 
 # Python smoke-test via pfobos wrapper:
 python3 -c "
-from shared.fwrapper import FobosSDR
+from pfobos import FobosSDR
 sdr = FobosSDR()
 sdr.open(0)
 rates = sdr.get_samplerates()

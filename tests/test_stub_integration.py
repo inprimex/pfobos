@@ -38,7 +38,7 @@ SKIP_MSG = (
     "Stub library not built. Run: uv run python tests/stub/build.py"
 )
 
-from shared.fwrapper import FobosSDR, FobosException
+from pfobos import FobosSDR, FobosException
 
 
 # ---------------------------------------------------------------------------

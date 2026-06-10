@@ -10,7 +10,7 @@ import sys
 import os
 
 # Import the wrapper from the shared module
-from shared.fwrapper import FobosSDR, FobosException, FobosError
+from pfobos import FobosSDR, FobosException, FobosError
 
 
 class TestWrapperLogic(unittest.TestCase):
@@ -19,9 +19,9 @@ class TestWrapperLogic(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures."""
         # Create patchers
-        self.ffi_patcher = patch('shared.fwrapper.FFI')
-        self.os_patcher = patch('shared.fwrapper.os')
-        self.sys_patcher = patch('shared.fwrapper.sys')
+        self.ffi_patcher = patch('pfobos.fwrapper.FFI')
+        self.os_patcher = patch('pfobos.fwrapper.os')
+        self.sys_patcher = patch('pfobos.fwrapper.sys')
         
         # Start patchers
         self.mock_ffi = self.ffi_patcher.start()
