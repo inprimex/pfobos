@@ -20,7 +20,7 @@ Unlike the comprehensive benchmark tool (`benchmark.py`), these tests focus on q
 ## Requirements
 
 - Python 3.7+
-- Fobos SDR Python wrapper (`shared/fwrapper.py`)
+- Fobos SDR Python wrapper (`pfobos/fwrapper.py`)
 - Python packages:
   - numpy
   - scipy

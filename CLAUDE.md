@@ -10,8 +10,8 @@ Platform: Linux (WSL2), Python 3.7+, hardware USB SDR device.
 
 ```
 pfobos/
-├── shared/fwrapper.py        # Core: FobosSDR class (CFFI bindings to libfobos)
-├── shared/__init__.py        # Exports FobosSDR, FobosException
+├── pfobos/fwrapper.py        # Core: FobosSDR class (CFFI bindings to libfobos) — shipped in wheel
+├── pfobos/__init__.py        # Exports FobosSDR, FobosException, FobosError
 ├── rtanalyzer/rtanalyzer.py  # Real-time spectrum analyzer (matplotlib, sync mode)
 ├── rtanalyzer/__init__.py
 ├── fmreceiver/
@@ -44,10 +44,12 @@ pfobos/
 ├── run_tests.py              # Main test runner (argparse CLI)
 ├── run_rtanalyzer.py         # Launch spectrum analyzer
 ├── run_setup.py              # Setup verification
-└── requirements.txt          # numpy, scipy, matplotlib, cffi, pandas, tabulate
+└── pyproject.toml            # core: numpy + cffi only; extras: [apps], [audio], [webui]
 ```
 
-## Core Class: FobosSDR (`shared/fwrapper.py`)
+## Core Class: FobosSDR (`pfobos/fwrapper.py`)
+
+Importable as `from pfobos import FobosSDR, FobosException, FobosError`.
 
 - Uses **CFFI** (`cffi.FFI`) to load `libfobos.so` (Linux) / `fobos.dll` (Windows)
 - Library loaded via `ffi.dlopen()` — must be in system path or same directory
@@ -113,7 +115,7 @@ uv run python tests/stub/build.py   # produces tests/stub/libfobos.so
 
 **Usage:**
 ```python
-from shared.fwrapper import FobosSDR
+from pfobos import FobosSDR
 sdr = FobosSDR(lib_path="tests/stub/libfobos.so")
 ```
 
@@ -144,8 +146,7 @@ python -m fmreceiver.fobos_fm_receiver -f 95.5 -g 12
 
 ## Key Conventions
 
-- **Imports**: All apps import from `shared.fwrapper` (not a legacy `fobos_wrapper`)
-  - Note: `fmreceiver/fobos_fm_receiver_paplay.py` still uses `from fobos_wrapper import` (legacy, needs fix)
+- **Imports**: All consumers import from `pfobos` (`from pfobos import FobosSDR, FobosException`). Legacy `shared.fwrapper` and `fobos_wrapper` paths are gone.
 - **Error handling**: Always catch `FobosException`; never swallow in finally (log only)
 - **Buffer sizes**: Must be even (I/Q pairs); minimum 1024 floats
 - **Context manager**: `FobosSDR` supports `with` statement → auto `close()`
@@ -153,7 +154,6 @@ python -m fmreceiver.fobos_fm_receiver -f 95.5 -g 12
 
 ## Known Issues / Tech Debt
 
-- `fmreceiver/fobos_fm_receiver_paplay.py` imports from `fobos_wrapper` (old name) instead of `shared.fwrapper`
 - `stop_rx_async` has a 5s timeout + polling loop; can block on USB cancel
 - `read_rx_sync` and async callbacks use `np.frombuffer(ffi.buffer(...)).copy()` for fast C→numpy transfer
 - `rtanalyzer.py` saves to `spectrum_plots/` directory (excluded from git)
@@ -163,8 +163,10 @@ python -m fmreceiver.fobos_fm_receiver -f 95.5 -g 12
 This project uses [uv](https://docs.astral.sh/uv/) for dependency management.
 
 ```bash
-uv sync                  # install all dependencies (creates .venv)
-uv sync --extra audio    # also install sounddevice + pulsectl
+uv sync                  # core deps only: numpy + cffi (slim runtime profile)
+uv sync --extra apps     # add scipy/matplotlib/pandas/tabulate for rtanalyzer + benchmarks
+uv sync --extra audio    # add sounddevice + pulsectl for fmreceiver
+uv sync --extra webui    # add fastapi + uvicorn for webui/
 uv run python run_tests.py        # run with managed environment
 uv run python run_rtanalyzer.py   # run spectrum analyzer
 uv add <package>         # add a new dependency
@@ -221,15 +223,15 @@ uv run python -m webui.server --host 0.0.0.0       # accessible from Windows bro
 - WebFFT: client-side FFT via webfft npm package (toggle on/off)
 
 
-<!-- maestro:begin -->
-## Maestro Orchestration Rules
+<!-- otaman:begin -->
+## Otaman Orchestration Rules
 
 **You are `hardware-agent`**. You own this repository: **pfobos**.
 
-Maestro folder: `../watchtower-otaman/` (contains `.agents/`, `platform.yaml`, bus messages)
+Otaman folder: `../watchtower-otaman/` (contains `.agents/`, `platform.yaml`, bus messages)
 
 ### First Session Checklist
-1. Run `maestro check` (Bash) — see pending bus messages and blocked tasks. The CLI auto-detects project root, your agent identity, and ack status. No MCP tool-loading needed for this hot path; pre-allowed in `.claude/settings.local.json`.
+1. Run `otaman check` (Bash) — see pending bus messages. The CLI auto-detects project root, your agent identity, and ack status. No MCP tool-loading needed for this hot path; pre-allowed in `.claude/settings.local.json`.
 2. Read `../watchtower-otaman/.agents/queue/hardware-agent.md` — see your active/queued/blocked tasks
 3. Read specs relevant to your repo (specs_dir paths below)
 4. Run `git log --oneline -10` — understand recent changes
@@ -257,20 +259,22 @@ Maestro folder: `../watchtower-otaman/` (contains `.agents/`, `platform.yaml`, b
 
 ### Communication — Bash CLI for hot path, MCP for richer ops
 
-Hot-path commands (frequent, read-mostly) — use the `maestro` Bash CLI, pre-allowed in this repo's settings:
-- `maestro check` — list pending messages for you (auto-detects identity)
-- `maestro ack <msg-stem>` — acknowledge a message (default: resolved; `--read` keeps it visible)
-- `maestro status` — project-wide summary
-- `maestro queue` — your task queue
-- `maestro blocked` — your blocked tasks
+Hot-path commands (frequent, read-mostly) — use the `otaman` Bash CLI, pre-allowed in this repo's settings:
+- `otaman check` — list pending messages for you (auto-detects identity)
+- `otaman ack <msg-stem>` — acknowledge a message (default: resolved; `--read` keeps it visible)
+- `otaman status` — project-wide summary
+- `otaman complete <change-name> --all` — mark OpenSpec tasks complete + broadcast task-complete
+- `otaman propose <title>` — propose a spec change (pending human approval)
+- Read `.agents/queue/<your-agent>.md` directly for your task queue (no CLI subcommand needed)
+- Read `.agents/blocked/<your-agent>.md` directly for blocked-task tracking
 
 Richer / less-frequent ops — use MCP tools (load schemas with ToolSearch first when calling directly):
-- `maestro_send(cwd, to, subject, body)` — send a message to another agent
-- `maestro_read_message(cwd, message_stem)` — read full message content programmatically
-- `maestro_propose(cwd, title, what_needs_to_change, why_needed)` — propose a spec change
-- `maestro_complete(cwd, change_name, tasks)` — report task completion
-- `maestro_read_spec(cwd, spec_path)` — read spec files
-- `maestro_list_agents(cwd)`, `maestro_set_agent(cwd, name)`, `maestro_cleanup(cwd)` — agent registry / housekeeping
+- `otaman_send(cwd, to, subject, body)` — send a message to another agent
+- `otaman_read_message(cwd, message_stem)` — read full message content programmatically
+- `otaman_propose(cwd, title, what_needs_to_change, why_needed)` — propose a spec change
+- `otaman_complete(cwd, change_name, tasks)` — report task completion
+- `otaman_read_spec(cwd, spec_path)` — read spec files
+- `otaman_list_agents(cwd)`, `otaman_set_agent(cwd, name)`, `otaman_cleanup(cwd)` — agent registry / housekeeping
 
 Why the split: bus checks happen dozens of times per session, and the MCP-via-instruction path proved unreliable across model variants (2026-04-29 incident — see plugin CLAUDE.md). The Bash CLI is deterministic. Heavier write operations stay on MCP because their structured payload is worth the schema-load overhead.
 
@@ -281,7 +285,7 @@ Why the split: bus checks happen dozens of times per session, and the MCP-via-in
   - When idle or waiting for anything
   - After every 3-5 tool calls during active work
 - **Never let pending messages exceed 3 without acting**
-- When you change an API or shared type: send `contract-change` via `maestro_send` BEFORE committing
+- When you change an API or shared type: send `contract-change` via `otaman_send` BEFORE committing
 - Message handling while busy: ack as `read`, add to queue, finish current task first
 - Urgent messages: pause current work, inform the human immediately
 
@@ -294,11 +298,11 @@ Why the split: bus checks happen dozens of times per session, and the MCP-via-in
 
 ### Task Completion Reporting (CRITICAL)
 - When you finish tasks from a `task-assignment`, you MUST report completion:
-  - `maestro complete <change-name> --tasks "2.1, 2.3"` (specific tasks)
-  - `maestro complete <change-name> --all` (all tasks for that change)
+  - `otaman complete <change-name> --tasks "2.1, 2.3"` (specific tasks)
+  - `otaman complete <change-name> --all` (all tasks for that change)
 - This updates `tasks.md` checkboxes in the specs repo and sends a `task-complete` bus message
-- **Lifecycle**: task-assignment received -> ack "read" -> implement -> `maestro complete` -> ack "resolved"
-- NEVER ack a task-assignment as "resolved" without first running `maestro complete`
+- **Lifecycle**: task-assignment received -> ack "read" -> implement -> `otaman complete` -> ack "resolved"
+- NEVER ack a task-assignment as "resolved" without first running `otaman complete`
 
 ### Specs (OpenSpec)
 - Specs repo: `../watchtower-specs` (READ-ONLY)
@@ -306,12 +310,12 @@ Why the split: bus checks happen dozens of times per session, and the MCP-via-in
 - **Shared contracts**: `../watchtower-specs/openspec/specs/shared-contracts/spec.md` — message schemas, signal classes, security contracts
 - **Active changes for you**: scan `../watchtower-specs/openspec/changes/` for folders whose `tasks.md` references your repo or domain. Read `proposal.md` → `design.md` → `tasks.md` in each.
 - **All accumulated specs**: `../watchtower-specs/openspec/specs/`
-- To propose a spec change, use `/maestro:propose` — do NOT modify specs directly
+- To propose a spec change, use `/otaman:propose` — do NOT modify specs directly
 
 ### Spec Change Rules (CRITICAL)
-- If you discover a missing endpoint, contract gap, or any spec change needed: run `/maestro:propose`, then **STOP** working on that feature
+- If you discover a missing endpoint, contract gap, or any spec change needed: run `/otaman:propose`, then **STOP** working on that feature
 - **Never implement against a spec that doesn't exist yet** — wait for human approval + spec commit
-- After proposing, switch to other tasks. Run `/maestro:check` periodically to see if your proposal was approved
+- After proposing, switch to other tasks. Run `/otaman:check` periodically to see if your proposal was approved
 - Resume the blocked task only after you see BOTH `spec-change-approved` AND `spec-change` messages
 - Check `../watchtower-otaman/.agents/blocked/hardware-agent.md` for your currently blocked tasks
 
@@ -324,4 +328,4 @@ Why the split: bus checks happen dozens of times per session, and the MCP-via-in
 - Work in branches: `agent/hardware-agent/{feature-name}`
 - All changes go through PRs
 - Write clear commit messages for the audit trail
-<!-- maestro:end -->
+<!-- otaman:end -->

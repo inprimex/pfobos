@@ -26,7 +26,7 @@ import os
 import signal as sig
 from queue import Queue
 import subprocess
-from shared.fwrapper import FobosSDR, FobosException
+from pfobos import FobosSDR, FobosException
 
 # Try to import pulsectl (optional)
 try:

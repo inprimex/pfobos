@@ -19,7 +19,7 @@ While the unit-test based performance tests (`test_performance.py`) focus on qui
 ## Requirements
 
 - Python 3.7+
-- Fobos SDR Python wrapper (shared/fwrapper.py)
+- Fobos SDR Python wrapper (pfobos/fwrapper.py)
 - Python packages:
   - numpy
   - matplotlib (for plot generation)

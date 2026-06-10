@@ -28,8 +28,7 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-# Import from shared module directly to maintain consistency with other tests
-from shared.fwrapper import FobosSDR, FobosException, FobosError
+from pfobos import FobosSDR, FobosException, FobosError
 
 # Import the hardware detection decorator from integration tests
 # Using relative import which is more appropriate for a test package

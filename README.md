@@ -91,7 +91,7 @@ uv run python -m fmreceiver.fobos_fm_receiver -f 95.5
 ## API Example
 
 ```python
-from shared.fwrapper import FobosSDR
+from pfobos import FobosSDR
 
 with FobosSDR() as sdr:
     sdr.open(0)
@@ -125,7 +125,7 @@ See [doc/tests.md](doc/tests.md) for full testing documentation.
 
 ```
 pfobos/
-├── shared/fwrapper.py        # Core: FobosSDR class (CFFI bindings)
+├── pfobos/fwrapper.py        # Core: FobosSDR class (CFFI bindings) — shipped in wheel
 ├── webui/                    # Browser spectrum viewer (FastAPI + WebSocket)
 │   ├── server.py             # FastAPI app + REST + WebSocket /ws
 │   ├── sdr_worker.py         # Background IQ reader + FFT → asyncio queue
@@ -149,6 +149,8 @@ pfobos/
 | [doc/tests.md](doc/tests.md) | Testing infrastructure |
 | [doc/benchmark.md](doc/benchmark.md) | Benchmark tool |
 | [doc/structure.md](doc/structure.md) | Full project structure |
+| [doc/aarch64-build.md](doc/aarch64-build.md) | aarch64 (OPI5 / Jetson) libfobos + SoapyFobosSDR builder |
+| [doc/edge-runtime-deployment.md](doc/edge-runtime-deployment.md) | `libfobos.so` install paths for edge runtime images (watchtower-edge contract) |
 
 ## License
 

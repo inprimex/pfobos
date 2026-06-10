@@ -1457,15 +1457,19 @@ wheels = [
 
 [[package]]
 name = "pfobos"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "cffi" },
-    { name = "matplotlib", version = "3.9.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
-    { name = "matplotlib", version = "3.10.8", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
     { name = "numpy", version = "2.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.10.*'" },
     { name = "numpy", version = "2.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+]
+
+[package.optional-dependencies]
+apps = [
+    { name = "matplotlib", version = "3.9.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
+    { name = "matplotlib", version = "3.10.8", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
     { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "pandas", version = "3.0.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "scipy", version = "1.13.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
@@ -1473,8 +1477,6 @@ dependencies = [
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "tabulate" },
 ]
-
-[package.optional-dependencies]
 audio = [
     { name = "pulsectl" },
     { name = "sounddevice" },
@@ -1496,16 +1498,16 @@ dev = [
 requires-dist = [
     { name = "cffi", specifier = ">=1.14.0" },
     { name = "fastapi", marker = "extra == 'webui'", specifier = ">=0.100.0" },
-    { name = "matplotlib", specifier = ">=3.4.0" },
+    { name = "matplotlib", marker = "extra == 'apps'", specifier = ">=3.4.0" },
     { name = "numpy", specifier = ">=1.20.0" },
-    { name = "pandas", specifier = ">=1.3.0" },
+    { name = "pandas", marker = "extra == 'apps'", specifier = ">=1.3.0" },
     { name = "pulsectl", marker = "extra == 'audio'", specifier = ">=22.0.0" },
-    { name = "scipy", specifier = ">=1.6.0" },
+    { name = "scipy", marker = "extra == 'apps'", specifier = ">=1.6.0" },
     { name = "sounddevice", marker = "extra == 'audio'", specifier = ">=0.4.0" },
-    { name = "tabulate", specifier = ">=0.8.9" },
+    { name = "tabulate", marker = "extra == 'apps'", specifier = ">=0.8.9" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'webui'", specifier = ">=0.22.0" },
 ]
-provides-extras = ["audio", "webui"]
+provides-extras = ["apps", "audio", "webui"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=7.0.0" }]

@@ -19,7 +19,7 @@ import signal as sig
 import subprocess
 import tempfile
 from queue import Queue
-from fobos_wrapper import FobosSDR, FobosException
+from pfobos import FobosSDR, FobosException
 
 # Default configuration
 DEFAULT_FREQ = 95.5e6  # Default FM station frequency (95.5 MHz)

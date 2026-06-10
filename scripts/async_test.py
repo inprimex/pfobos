@@ -24,7 +24,7 @@ project_root = os.path.dirname(script_dir)  # Assuming script is in ./scripts su
 sys.path.append(project_root)
 
 # Import the wrapper from the shared module
-from shared.fwrapper import FobosSDR, FobosException
+from pfobos import FobosSDR, FobosException
 
 class AsyncTester:
     """Class-based approach similar to rtanalyzer.py"""

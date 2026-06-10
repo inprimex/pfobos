@@ -21,8 +21,7 @@ from collections import deque
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Import from shared module
-from shared.fwrapper import FobosSDR, FobosException
+from pfobos import FobosSDR, FobosException
 
 
 def requires_hardware(test_method):

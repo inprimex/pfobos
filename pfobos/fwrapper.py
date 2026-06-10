@@ -100,7 +100,7 @@ class FobosSDR:
         else:
             raise OSError(f"Unsupported platform: {sys.platform}")
 
-        # Try system path first, then the shared/ directory alongside this file
+        # Try system path first, then the pfobos/ package directory alongside this file
         try:
             self.lib = self.ffi.dlopen(lib_name)
         except OSError:

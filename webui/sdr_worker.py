@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
-from shared.fwrapper import FobosSDR, FobosException
+from pfobos import FobosSDR, FobosException
 
 # Plasma colormap: 256 RGB triplets (uint8) precomputed from matplotlib
 _PLASMA = [

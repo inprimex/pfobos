@@ -65,11 +65,11 @@ def check_dependencies():
 def verify_project_structure():
     """Verify that all required project files and directories exist."""
     required_paths = [
-        'requirements.txt',
+        'pyproject.toml',
         'rtanalyzer/__init__.py',
         'rtanalyzer/rtanalyzer.py',
-        'shared/__init__.py',
-        'shared/fwrapper.py',
+        'pfobos/__init__.py',
+        'pfobos/fwrapper.py',
         'setup/setup-fobos-sdr.sh'
     ]
     

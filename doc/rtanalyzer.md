@@ -58,11 +58,11 @@ The project follows a modular architecture to support multiple proof-of-concept 
 ```
 project_root/
 │
-├── shared/               # Shared components used across all POCs
-│   ├── __init__.py       # Package definition exposing FobosSDR and FobosException
+├── pfobos/               # Installable wrapper package (shipped in wheel)
+│   ├── __init__.py       # Package definition exposing FobosSDR, FobosException, FobosError
 │   └── fwrapper.py       # SDR wrapper implementing the hardware interface
 │
-├── rtanalyzer/           # Spectrum analyzer implementation
+├── rtanalyzer/           # Spectrum analyzer implementation (dev tool, not in wheel)
 │   ├── __init__.py       # Package definition exposing EnhancedRealTimeAnalyzer
 │   └── rtanalyzer.py     # Main analyzer implementation
 │
@@ -70,22 +70,22 @@ project_root/
 │   └── rtanalyzer.md     # This documentation file
 │
 ├── run_rtanalyzer.py     # Entry point script for spectrum analyzer
-└── requirements.txt      # Python dependencies
+└── pyproject.toml        # Project metadata + dependencies (uv managed)
 ```
 
 ### Technical Design
 
-#### Shared Module
-The `shared` module uses Python's package system to provide reusable components:
+#### Wrapper Module
+The `pfobos` package uses Python's package system to provide the runtime wrapper:
 
 - **fwrapper.py**: Implements `FobosSDR` class that wraps C library functions using CFFI
-- **__init__.py**: Properly exports `FobosSDR` and `FobosException` classes
+- **__init__.py**: Exports `FobosSDR`, `FobosException`, and `FobosError`
 
 #### Analyzer Implementation
 The spectrum analyzer uses a class-based approach with these key components:
 
 - **UI Layer**: Built with Matplotlib for real-time plotting and interactive controls
-- **SDR Communication**: Uses the shared FobosSDR wrapper for device interaction
+- **SDR Communication**: Uses the `pfobos.FobosSDR` wrapper for device interaction
 - **Configuration Management**: Handles parameter validation and live updates
 
 #### Import Strategy
@@ -94,13 +94,10 @@ The project uses relative imports and path manipulation to ensure components can
 ```python
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from shared.fwrapper import FobosSDR, FobosException
+from pfobos import FobosSDR, FobosException
 ```
 
-This approach allows:
-- Running scripts from any directory
-- Adding new POC modules without changing imports
-- Maintaining clean separation between components
+`pfobos` is also installable as a standalone wheel (`uv pip install pfobos` once published) — no `sys.path` manipulation needed for downstream consumers.
 
 ## Configuration Parameters
 

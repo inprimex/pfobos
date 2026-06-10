@@ -4,13 +4,13 @@ This document outlines the key components and organization of the Fobos SDR Pyth
 
 ## Core Components
 
-### 1. Wrapper Module (`shared/`)
+### 1. Wrapper Module (`pfobos/`)
 
-The foundational wrapper for the Fobos SDR C library:
+The foundational wrapper for the Fobos SDR C library. This is the only directory shipped in the published wheel — importable as `from pfobos import FobosSDR, FobosException, FobosError`.
 
 ```
-shared/
-├── __init__.py          # Package exports (FobosSDR, FobosException)
+pfobos/
+├── __init__.py          # Package exports (FobosSDR, FobosException, FobosError)
 └── fwrapper.py          # Core wrapper implementation with CFFI bindings
 ```
 
@@ -153,7 +153,7 @@ doc/
 
 ## Development Workflow
 
-1. Modify wrapper code in `shared/fwrapper.py`
+1. Modify wrapper code in `pfobos/fwrapper.py`
 2. Run tests with `python run_tests.py`
 3. Update/extend applications in `rtanalyzer/` or `fmreceiver/`
 4. Run benchmarks to verify performance with `python run_tests.py --benchmark`
