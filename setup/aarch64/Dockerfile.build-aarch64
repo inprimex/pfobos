@@ -93,7 +93,7 @@ RUN mkdir -p /artifact/lib /artifact/include /artifact/udev \
 # and double-nested the destination path on success (dir-prefix strip bug).
 RUN if [ "$WITH_SOAPY" = "1" ]; then \
         set -e ; \
-        SOAPY_MODULE=$(find /usr/local/lib /usr/lib -name "FobosSDRSupport.so" 2>/dev/null | head -1) ; \
+        SOAPY_MODULE=$(find /usr/local/lib /usr/lib -name "*FobosSDRSupport.so" 2>/dev/null | head -1) ; \
         if [ -z "$SOAPY_MODULE" ]; then \
             echo "ERROR: WITH_SOAPY=1 but FobosSDRSupport.so was not produced by the SoapyFobosSDR build" >&2 ; \
             echo "       Check the cmake --install step above for the SoapyFobosSDR stage." >&2 ; \
