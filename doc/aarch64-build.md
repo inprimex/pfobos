@@ -2,8 +2,15 @@
 
 ## What this produces
 
-`libfobos.so`, `libfobos_sdr.so`, and `FobosSDRSupport.so` (SoapySDR `driver=fobos`)
-built for `linux/arm64`. Artifact lives in `dist/fobos-aarch64/` after either build method.
+`libfobos.so` and `libfobos_sdr.so` built for `linux/arm64` (always). Optionally
+`FobosSDRSupport.so` (SoapySDR `driver=fobos`) when built with `--with-soapy`.
+Artifact lives in `dist/fobos-aarch64/` after either build method.
+
+After the `pfobos-as-primary-sdr-backend` cutover, `watchtower-edge` uses the
+native `pfobos` CFFI wrapper and no longer ships SoapySDR — so the default build
+is **WITH_SOAPY=0**. Opt into the SoapyFobosSDR module only for the
+`sdr.backend: soapy` fallback path, the §3.5 regression smoke, or external
+Soapy-based tooling.
 
 ## Build methods
 
@@ -13,11 +20,17 @@ built for `linux/arm64`. Artifact lives in `dist/fobos-aarch64/` after either bu
 # One-time QEMU setup (if not already done):
 docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
 
-# Build:
+# Default — pfobos native backend only (no SoapyFobosSDR):
 ./setup/aarch64/build-docker.sh
+
+# With SoapyFobosSDR module (for soapy fallback / §3.5 regression smoke):
+./setup/aarch64/build-docker.sh --with-soapy
 ```
 
 Takes ~5–10 min on first run (QEMU-emulated arm64). Subsequent runs use layer cache.
+The `--with-soapy` build adds ~1–2 min for the extra SoapyFobosSDR cmake step and
+pulls `libsoapysdr-dev` + `soapysdr-tools` into the builder image (does not affect
+the final artifact size — only `FobosSDRSupport.so` is exported).
 
 ### 2. Cross-compile (faster, no Docker required)
 
@@ -36,12 +49,12 @@ sudo apt-get install -y \
 
 ## Artifact layout
 
+WITH_SOAPY=0 (default):
 ```
 dist/fobos-aarch64/
 ├── lib/
 │   ├── libfobos.so → libfobos.so.X.Y.Z
-│   ├── libfobos_sdr.so → libfobos_sdr.so.X.Y.Z
-│   └── SoapySDR/modules0.8/FobosSDRSupport.so
+│   └── libfobos_sdr.so → libfobos_sdr.so.X.Y.Z
 ├── include/
 │   ├── fobos.h
 │   └── fobos_sdr.h
@@ -50,19 +63,40 @@ dist/fobos-aarch64/
 └── VERSIONS
 ```
 
+WITH_SOAPY=1 adds:
+```
+├── lib/
+│   └── SoapySDR/modules0.8/FobosSDRSupport.so
+└── soapy-probe.log
+```
+
+The `VERSIONS` manifest always records the `WITH_SOAPY` flag and SoapyFobosSDR
+commit (when built) so downstream consumers can verify what's in the artifact.
+
 ## Embedded-agent Dockerfile integration
 
-Add to `watchtower-edge/Dockerfile` (OrangePi target stage):
+The `build-docker.sh` script prints the matching Dockerfile snippet for the
+build mode at the end of its run. Quick reference:
 
+### WITH_SOAPY=0 (pfobos native, default)
 ```dockerfile
-# SoapySDR runtime + USB
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libusb-1.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY dist/fobos-aarch64/lib/ /usr/local/lib/
+COPY dist/fobos-aarch64/include/ /usr/local/include/
+RUN ldconfig
+```
+
+### WITH_SOAPY=1 (SoapyFobosSDR fallback included)
+```dockerfile
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libsoapysdr0.8 \
         soapysdr-tools \
         libusb-1.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# Fobos libs + SoapySDR module
 COPY dist/fobos-aarch64/lib/ /usr/local/lib/
 COPY dist/fobos-aarch64/include/ /usr/local/include/
 RUN ldconfig
@@ -70,6 +104,8 @@ RUN ldconfig
 # Verify module registration (no hardware needed)
 RUN SoapySDRUtil --find="driver=fobos" 2>&1 || true
 ```
+
+See `doc/edge-runtime-deployment.md` for the full deployment contract.
 
 ## Board-specific kernel notes (OrangePi 5 Max / RK3588)
 
