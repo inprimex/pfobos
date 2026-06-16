@@ -6,6 +6,21 @@ libfobos.so and reads IQ data cleanly. Gate for embedded-agent's §5.1 default
 flip (sdr.backend: pfobos in watchtower-edge config templates and Docker
 defaults).
 
+The goal is ABI compatibility, not sustained-throughput stress. Long sustained
+reads at high rates are easy to write but hard to interpret — `read_rx_sync`
+can block indefinitely without raising on USB hiccups, so a multi-minute
+naive loop doesn't validate ABI, it just stress-tests the bus. We do two
+short scoped checks instead:
+
+  1. Sustained sync at SUSTAIN_RATE_HZ (default 10 MSPS — embedded-agent's
+     validated rate from 2026-06-10 OPI5-1 bring-up) for SUSTAIN_SECONDS
+     (default 5 s). Counts chunks, measures throughput, validates first-chunk
+     health (dtype / shape / not-all-zero / no-NaN).
+  2. Brief negotiation + 10-chunk read at HIGH_RATE_HZ (default 50 MSPS — the
+     fobos-sdr-profile spec target) to confirm the device accepts the rate
+     and produces well-formed chunks. Does NOT do sustained reads at this
+     rate; that's a separate fobos-sdr-profile validation, not §4.3.
+
 Run on OPI5-N with a Fobos SDR USB-attached:
 
     uv run python bench/wrapper_smoke.py
@@ -14,9 +29,9 @@ Run on OPI5-N with a Fobos SDR USB-attached:
 Exits non-zero on any of:
   - libfobos.so does not load
   - no Fobos device enumerated
-  - 50 MSPS missing from device-reported sample-rate list
+  - HIGH_RATE_HZ missing from device-reported sample-rate list
   - sync RX produces a malformed or all-zero chunk
-  - sync RX underflows / aborts mid-run
+  - sync RX underruns 4+ times mid-run
   - async RX callback never fires
 """
 from __future__ import annotations
@@ -35,25 +50,31 @@ import numpy as np
 from pfobos import FobosSDR, FobosException
 
 
-# Target sample rate for the sustained sync test. Must be advertised by the
-# device in fobos_rx_get_samplerates(). 50 MSPS is the production profile
-# after the 2026-04-24 fobos_sdr.yaml schema change (was 20 MSPS / 20 MHz).
-TARGET_RATE_HZ = 50_000_000
+# Sustained sync test — embedded-agent's validated rate from the 2026-06-10
+# OPI5-1 bring-up (Fobos serial A1D610000964, FW 2.2.0, 16384 complex64
+# samples at 10 MSPS clean). Short SUSTAIN_SECONDS — §4.3 is an ABI smoke,
+# not a throughput benchmark.
+SUSTAIN_RATE_HZ = 10_000_000
+SUSTAIN_SECONDS = 5
 
-# Sustained-read duration (seconds) — long enough to surface USB hiccups and
-# OPI5 RK3588 xhci-hcd buffer behaviour without being painful to re-run.
-SUSTAIN_SECONDS = 60
+# High-rate sanity — fobos-sdr-profile spec target (post 2026-04-24 schema
+# change to 50 MSPS / 50 MHz BW from 20 / 20). We only confirm the device
+# advertises and accepts this rate and produces good chunks; we do NOT
+# sustained-read at this rate (that's a separate fobos-sdr-profile
+# validation, not §4.3 ABI smoke).
+HIGH_RATE_HZ = 50_000_000
+HIGH_RATE_CHUNKS = 10
 
 # Sync buffer length in floats (I/Q interleaved). 65536 floats = 32768 IQ
-# pairs = 32768 complex64 samples per chunk = ~0.66 ms at 50 MSPS.
+# pairs = 32768 complex64 samples per chunk.
 SYNC_BUF_FLOATS = 65536
 
-# Async test parameters — 16 buffers x 32768 IQ pairs each, ~10 ms wall-clock
-# inside the C thread before we cancel. Goal is to confirm the callback wiring
-# survives the C → numpy hand-off, not to stress the bus.
+# Async test parameters — 16 buffers x 32768 IQ pairs each. Goal is to
+# confirm the callback wiring survives the C → numpy hand-off, not to
+# stress the bus.
 ASYNC_BUF_COUNT = 16
 ASYNC_BUF_LENGTH = 32768
-ASYNC_WALL_SECONDS = 5
+ASYNC_WALL_SECONDS = 3
 
 
 def _now_utc_iso() -> str:
@@ -71,15 +92,110 @@ def _chunk_health(iq: np.ndarray) -> dict:
     }
 
 
-def smoke(out_path: Path | None) -> int:
+def _sustained_read(sdr: FobosSDR, rate_hz: int, seconds: int,
+                    label: str, freq_hz: int = 868_000_000) -> dict:
+    actual_rate = sdr.set_samplerate(rate_hz)
+    sdr.set_frequency(freq_hz)
+    sdr.set_lna_gain(1)
+    sdr.set_vga_gain(8)
+    sdr.start_rx_sync(SYNC_BUF_FLOATS)
+
+    deadline = time.monotonic() + seconds
+    n_chunks = 0
+    n_underrun = 0
+    first_chunk_health: dict | None = None
+    bytes_read = 0
+    t_start = time.monotonic()
+    aborted = None
+    try:
+        while time.monotonic() < deadline:
+            try:
+                iq = sdr.read_rx_sync()
+            except FobosException as e:
+                n_underrun += 1
+                if n_underrun > 3:
+                    aborted = e.message
+                    break
+                continue
+            n_chunks += 1
+            bytes_read += iq.nbytes
+            if first_chunk_health is None:
+                first_chunk_health = _chunk_health(iq)
+    finally:
+        sdr.stop_rx_sync()
+
+    elapsed = time.monotonic() - t_start
+    nominal_bytes = seconds * actual_rate * 8  # 8 bytes per complex64
+    return {
+        "label": label,
+        "requested_rate_hz": rate_hz,
+        "actual_rate_hz": float(actual_rate),
+        "duration_s": elapsed,
+        "chunks_read": n_chunks,
+        "bytes_read": bytes_read,
+        "throughput_mbps": (bytes_read * 8) / (elapsed * 1e6) if elapsed > 0 else 0.0,
+        "nominal_mbps": (nominal_bytes * 8) / (seconds * 1e6) if seconds > 0 else 0.0,
+        "underrun_count": n_underrun,
+        "aborted_after": aborted,
+        "first_chunk": first_chunk_health,
+    }
+
+
+def _bounded_chunk_read(sdr: FobosSDR, rate_hz: int, n_chunks: int,
+                        freq_hz: int = 2_400_000_000) -> dict:
+    """Read a fixed number of chunks at rate_hz — bounded work, no wall-clock loop."""
+    actual_rate = sdr.set_samplerate(rate_hz)
+    sdr.set_frequency(freq_hz)
+    sdr.set_lna_gain(1)
+    sdr.set_vga_gain(8)
+    sdr.start_rx_sync(SYNC_BUF_FLOATS)
+
+    chunks: list[dict] = []
+    underrun = 0
+    t_start = time.monotonic()
+    try:
+        for _ in range(n_chunks):
+            t_a = time.monotonic()
+            try:
+                iq = sdr.read_rx_sync()
+            except FobosException as e:
+                underrun += 1
+                chunks.append({"underrun": e.message})
+                continue
+            t_b = time.monotonic()
+            chunks.append({
+                "read_ms": (t_b - t_a) * 1000.0,
+                "health": _chunk_health(iq),
+            })
+    finally:
+        sdr.stop_rx_sync()
+    elapsed = time.monotonic() - t_start
+
+    return {
+        "requested_rate_hz": rate_hz,
+        "actual_rate_hz": float(actual_rate),
+        "n_requested": n_chunks,
+        "n_received": sum(1 for c in chunks if "health" in c),
+        "underrun_count": underrun,
+        "elapsed_s": elapsed,
+        "chunks": chunks,
+    }
+
+
+def smoke(out_path: Path | None,
+          sustain_rate_hz: int,
+          sustain_seconds: int,
+          high_rate_hz: int,
+          high_rate_chunks: int) -> int:
     result = {
-        "schema": "pfobos-wrapper-smoke/1",
+        "schema": "pfobos-wrapper-smoke/2",
         "started_utc": _now_utc_iso(),
         "host": os.uname().nodename,
         "kernel": os.uname().release,
         "pfobos": {"import": "ok"},
         "device": {},
-        "sync_50msps": {},
+        "sustained_sync": {},
+        "high_rate_check": {},
         "async": {},
         "ok": False,
     }
@@ -103,60 +219,41 @@ def smoke(out_path: Path | None) -> int:
 
         rates = sdr.get_samplerates()
         result["device"]["samplerates_hz"] = [float(r) for r in rates]
-        if TARGET_RATE_HZ not in [int(r) for r in rates]:
-            result["device"]["target_rate_supported"] = False
+        result["device"]["high_rate_supported"] = (
+            high_rate_hz in [int(r) for r in rates]
+        )
+        result["device"]["sustain_rate_supported"] = (
+            sustain_rate_hz in [int(r) for r in rates]
+        )
+        if not result["device"]["high_rate_supported"]:
             return _finalize(result, out_path, ok=False, exit_code=4)
-        result["device"]["target_rate_supported"] = True
+        if not result["device"]["sustain_rate_supported"]:
+            return _finalize(result, out_path, ok=False, exit_code=4)
 
-        # ---- Sustained sync read at 50 MSPS ----
-        actual_rate = sdr.set_samplerate(TARGET_RATE_HZ)
-        sdr.set_frequency(868_000_000)
-        sdr.set_lna_gain(1)
-        sdr.set_vga_gain(8)
-        sdr.start_rx_sync(SYNC_BUF_FLOATS)
+        result["sustained_sync"] = _sustained_read(
+            sdr, sustain_rate_hz, sustain_seconds,
+            label=f"{sustain_rate_hz//1_000_000}MSPS sustained {sustain_seconds}s",
+        )
+        if result["sustained_sync"]["aborted_after"]:
+            return _finalize(result, out_path, ok=False, exit_code=5)
+        if not result["sustained_sync"]["first_chunk"]:
+            return _finalize(result, out_path, ok=False, exit_code=5)
+        fc = result["sustained_sync"]["first_chunk"]
+        if fc["all_zero"] or fc["any_nan"]:
+            return _finalize(result, out_path, ok=False, exit_code=6)
 
-        deadline = time.monotonic() + SUSTAIN_SECONDS
-        n_chunks = 0
-        n_underrun = 0
-        first_chunk_health = None
-        bytes_read = 0
-        t_start = time.monotonic()
-        try:
-            while time.monotonic() < deadline:
-                try:
-                    iq = sdr.read_rx_sync()
-                except FobosException as e:
-                    n_underrun += 1
-                    if n_underrun > 3:
-                        result["sync_50msps"]["aborted_after"] = e.message
-                        return _finalize(result, out_path, ok=False, exit_code=5)
-                    continue
-                n_chunks += 1
-                bytes_read += iq.nbytes
-                if first_chunk_health is None:
-                    first_chunk_health = _chunk_health(iq)
-                    if first_chunk_health["all_zero"] or first_chunk_health["any_nan"]:
-                        return _finalize(result, out_path, ok=False, exit_code=6)
-        finally:
-            sdr.stop_rx_sync()
-
-        elapsed = time.monotonic() - t_start
-        nominal_bytes = SUSTAIN_SECONDS * actual_rate * 8  # 8 bytes per complex64
-        result["sync_50msps"] = {
-            "requested_rate_hz": TARGET_RATE_HZ,
-            "actual_rate_hz": float(actual_rate),
-            "duration_s": elapsed,
-            "chunks_read": n_chunks,
-            "bytes_read": bytes_read,
-            "throughput_mbps": (bytes_read * 8) / (elapsed * 1e6),
-            "nominal_mbps": (nominal_bytes * 8) / (SUSTAIN_SECONDS * 1e6),
-            "underrun_count": n_underrun,
-            "first_chunk": first_chunk_health,
-        }
+        result["high_rate_check"] = _bounded_chunk_read(
+            sdr, high_rate_hz, high_rate_chunks,
+        )
+        if result["high_rate_check"]["n_received"] == 0:
+            return _finalize(result, out_path, ok=False, exit_code=6)
 
         # ---- Async callback round-trip ----
-        callback_events = []
+        callback_events: list[dict] = []
         callback_done = threading.Event()
+
+        sdr.set_samplerate(sustain_rate_hz)
+        sdr.set_frequency(868_000_000)
 
         def cb(iq: np.ndarray):
             callback_events.append({
@@ -180,7 +277,9 @@ def smoke(out_path: Path | None) -> int:
         result["async"] = {
             "wall_seconds": ASYNC_WALL_SECONDS,
             "callbacks_received": len(callback_events),
-            "first_callback_health": callback_events[0]["health"] if callback_events else None,
+            "first_callback_health": (
+                callback_events[0]["health"] if callback_events else None
+            ),
             "callback_thread_joined": not t_async.is_alive(),
         }
         if len(callback_events) == 0:
@@ -210,8 +309,22 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", type=Path, default=None,
                     help="JSON output path (default: stdout only)")
+    ap.add_argument("--sustain-rate", type=int, default=SUSTAIN_RATE_HZ,
+                    help=f"Sustained sync sample rate Hz (default {SUSTAIN_RATE_HZ})")
+    ap.add_argument("--sustain-seconds", type=int, default=SUSTAIN_SECONDS,
+                    help=f"Sustained sync duration seconds (default {SUSTAIN_SECONDS})")
+    ap.add_argument("--high-rate", type=int, default=HIGH_RATE_HZ,
+                    help=f"High-rate negotiation check Hz (default {HIGH_RATE_HZ})")
+    ap.add_argument("--high-rate-chunks", type=int, default=HIGH_RATE_CHUNKS,
+                    help=f"Number of chunks to read at the high rate (default {HIGH_RATE_CHUNKS})")
     args = ap.parse_args()
-    return smoke(args.out)
+    return smoke(
+        args.out,
+        sustain_rate_hz=args.sustain_rate,
+        sustain_seconds=args.sustain_seconds,
+        high_rate_hz=args.high_rate,
+        high_rate_chunks=args.high_rate_chunks,
+    )
 
 
 if __name__ == "__main__":
