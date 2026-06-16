@@ -102,11 +102,12 @@ RUN if [ "$WITH_SOAPY" = "1" ]; then \
         SOAPY_REL=$(dirname "$SOAPY_MODULE" | sed -e 's|^/usr/local/||' -e 's|^/usr/||') ; \
         mkdir -p "/artifact/${SOAPY_REL}" ; \
         cp -P "$SOAPY_MODULE" "/artifact/${SOAPY_REL}/" ; \
-        if [ ! -f "/artifact/${SOAPY_REL}/FobosSDRSupport.so" ]; then \
-            echo "ERROR: copy of FobosSDRSupport.so into /artifact/${SOAPY_REL}/ failed" >&2 ; \
+        SOAPY_BASENAME=$(basename "$SOAPY_MODULE") ; \
+        if [ ! -f "/artifact/${SOAPY_REL}/${SOAPY_BASENAME}" ]; then \
+            echo "ERROR: copy of ${SOAPY_BASENAME} into /artifact/${SOAPY_REL}/ failed" >&2 ; \
             exit 1 ; \
         fi ; \
-        echo "captured SoapyFobosSDR module: /artifact/${SOAPY_REL}/FobosSDRSupport.so" ; \
+        echo "captured SoapyFobosSDR module: /artifact/${SOAPY_REL}/${SOAPY_BASENAME}" ; \
     fi
 
 # VERSIONS manifest — always emit libfobos + libfobos-agile + arch; only emit
