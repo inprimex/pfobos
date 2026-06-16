@@ -109,14 +109,20 @@ def _percentile(arr: list[float], q: float) -> float:
 
 
 def _ensure_sync_started(sdr: FobosSDR) -> None:
-    """Restart sync mode if pfobos auto-stopped it after a transient read error.
+    """Restart sync mode if it's not active (belt-and-suspenders).
 
-    pfobos/fwrapper.py:read_rx_sync wraps its inner C call in a try/except that
-    on ANY non-zero return calls `self.stop_rx_sync()` (which sets
-    `self._sync_mode = False`) before re-raising as FobosException. A retune
-    sweep that catches one FobosException and continues then hits
-    `RuntimeError: Synchronous mode not started` on the next iteration. We
-    re-arm sync mode here so the sweep is robust to transient USB hiccups.
+    Originally added as a workaround for the pre-0.3.0 pfobos auto-stop trap:
+    `read_rx_sync` used to call `stop_rx_sync()` on any C-side error, killing
+    sync mode and making the next read raise `RuntimeError: Synchronous mode
+    not started`. The auto-stop was removed in pfobos 0.3.0 via spec change
+    `pfobos-read-rx-sync-no-auto-stop-on-error` — see the change folder in
+    watchtower-specs for the full contract.
+
+    Kept here as defensive code because the sweep does its own
+    `try/except FobosException; continue`, and if any future change to the
+    wrapper or a caller-side path (`stop_rx_sync` in a `finally`, manual
+    restart on certain error codes) drops sync mode we'd rather re-arm than
+    fail the rest of the sweep.
     """
     if not sdr._sync_mode:
         sdr.start_rx_sync(SYNC_BUF_FLOATS)
@@ -142,8 +148,9 @@ def measure_band(sdr: FobosSDR, target_hz: int) -> dict:
             first_ms.append((t_first - t0) * 1000.0)
         except FobosException:
             failures += 1
-            # Drop this retune; the auto-stop already cleaned up. Next iter
-            # will re-arm sync via _ensure_sync_started.
+            # Drop this retune. Sync mode survives errors as of pfobos 0.3.0
+            # (no auto-stop); _ensure_sync_started next iter is a no-op in the
+            # happy path but stays as defensive code (see its docstring).
             stable_ms.append(float("nan"))
             continue
 

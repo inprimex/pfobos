@@ -1,6 +1,6 @@
 [project]
 name = "pfobos"
-version = "0.2.0"
+version = "0.3.0"
 description = "Python wrapper for Fobos SDR C library (libfobos.so)"
 requires-python = ">=3.9"
 dependencies = [
