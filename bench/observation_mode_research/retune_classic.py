@@ -108,22 +108,44 @@ def _percentile(arr: list[float], q: float) -> float:
     return float(np.percentile(np.array(arr), q)) if arr else float("nan")
 
 
+def _ensure_sync_started(sdr: FobosSDR) -> None:
+    """Restart sync mode if pfobos auto-stopped it after a transient read error.
+
+    pfobos/fwrapper.py:read_rx_sync wraps its inner C call in a try/except that
+    on ANY non-zero return calls `self.stop_rx_sync()` (which sets
+    `self._sync_mode = False`) before re-raising as FobosException. A retune
+    sweep that catches one FobosException and continues then hits
+    `RuntimeError: Synchronous mode not started` on the next iteration. We
+    re-arm sync mode here so the sweep is robust to transient USB hiccups.
+    """
+    if not sdr._sync_mode:
+        sdr.start_rx_sync(SYNC_BUF_FLOATS)
+
+
 def measure_band(sdr: FobosSDR, target_hz: int) -> dict:
     first_ms: list[float] = []
     stable_ms: list[float] = []
     failures = 0
 
     for _ in range(N_RETUNES_PER_BAND):
-        # Park away so the next set_frequency triggers a real relock.
-        sdr.set_frequency(PARK_FREQ_HZ)
-        # Drain a chunk at the park freq so the buffer pipeline is fresh.
-        _ = sdr.read_rx_sync()
+        try:
+            _ensure_sync_started(sdr)
+            # Park away so the next set_frequency triggers a real relock.
+            sdr.set_frequency(PARK_FREQ_HZ)
+            # Drain a chunk at the park freq so the buffer pipeline is fresh.
+            _ = sdr.read_rx_sync()
 
-        t0 = time.perf_counter()
-        sdr.set_frequency(target_hz)
-        iq0 = sdr.read_rx_sync()
-        t_first = time.perf_counter()
-        first_ms.append((t_first - t0) * 1000.0)
+            t0 = time.perf_counter()
+            sdr.set_frequency(target_hz)
+            iq0 = sdr.read_rx_sync()
+            t_first = time.perf_counter()
+            first_ms.append((t_first - t0) * 1000.0)
+        except FobosException:
+            failures += 1
+            # Drop this retune; the auto-stop already cleaned up. Next iter
+            # will re-arm sync via _ensure_sync_started.
+            stable_ms.append(float("nan"))
+            continue
 
         window: list[float] = [_rms_db(iq0)]
         stable_reached = False
@@ -244,6 +266,7 @@ def main() -> int:
 
     sdr = FobosSDR()
     sdr.open(0)
+    fatal_error: BaseException | None = None
     try:
         result["device"] = sdr.get_board_info()
         result["api"] = sdr.get_api_info()
@@ -257,7 +280,19 @@ def main() -> int:
         try:
             for freq in args.bands:
                 print(f"  measuring {freq/1e6:.1f} MHz ...", flush=True)
-                band_result = measure_band(sdr, int(freq))
+                try:
+                    band_result = measure_band(sdr, int(freq))
+                except BaseException as e:
+                    # Preserve partial results from earlier bands; surface the
+                    # failure mode in the JSON for the writeup so the bench
+                    # crash itself is part of the dataset.
+                    result.setdefault("incomplete_at_hz", int(freq))
+                    result["error"] = {
+                        "type": type(e).__name__,
+                        "message": str(e),
+                    }
+                    fatal_error = e
+                    break
                 result["bands"].append(band_result)
                 f = band_result["first_chunk_ms"]
                 print(
@@ -266,20 +301,28 @@ def main() -> int:
                     flush=True,
                 )
         finally:
-            sdr.stop_rx_sync()
+            try:
+                sdr.stop_rx_sync()
+            except Exception:
+                pass
     finally:
-        sdr.close()
+        try:
+            sdr.close()
+        except Exception:
+            pass
 
     result["finished_utc"] = _now_utc_iso()
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(result, indent=2))
     print(f"wrote {args.out}")
 
-    if args.md:
+    if args.md and result["bands"]:
         args.md.parent.mkdir(parents=True, exist_ok=True)
         args.md.write_text(_markdown(result))
         print(f"wrote {args.md}")
 
+    if fatal_error is not None:
+        raise fatal_error
     return 0
 
 
