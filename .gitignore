@@ -183,3 +183,12 @@ spectrum_plots/
 
 # Maestro marker file (local pointer to maestro folder)
 .maestro
+
+# Maestro marker file (local pointer to maestro folder)
+.otaman
+
+# Bench output — IQ captures and per-run JSON/markdown results are large
+# and host-specific. Scripts that produce them live in bench/.
+bench/observation_mode_research/noise_captures/
+bench/observation_mode_research/results/
+bench/results/
