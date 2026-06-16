@@ -122,9 +122,119 @@ container can self-report its native-lib provenance — useful for the
 `pfobos backend init failure` scenario in §3.1 of the spec change
 (CRITICAL log line includes `libfobos.so` path + detected FW version).
 
+## Runtime gotchas surfaced from real deployments
+
+The following are field-observed pitfalls from the 2026-06-16 OPI5-1
+session that touched libfobos, the pfobos wrapper, and SoapySDR's Python
+bindings end-to-end. None of them block deployment; all of them
+are silent until they're not, so they live here rather than as a
+support ticket later.
+
+### Device degrades on uncaught crash → `usbreset 16d0:132e` to recover
+
+When a process holding the Fobos exits uncleanly (uncaught Python
+exception, SIGKILL, etc.), the device can drift into a state where the
+next `FobosSDR().open(0)` succeeds but `get_board_info()` returns
+garbled bytes: `hw_revision` regresses to `2.0.0`, `manufacturer` /
+`product` / `serial` go blank, `fw_version` becomes `" unknown"`.
+Subsequent calls flood `fobos_i2c_write() err -4` /
+`fobos_max2830_write_reg() err -4` — internal RF-chip register writes
+are failing.
+
+`sdr.reset()` (which calls `fobos_rx_reset` under the hood) does NOT
+recover. `usbreset 16d0:132e` (Linux user-space bus-level reset via
+libusb; available as `/usr/bin/usbreset` from the `usbutils` package)
+DOES.
+
+```bash
+# After an unclean exit, before any open():
+usbreset 16d0:132e
+sleep 2  # give libusb time to re-enumerate the device
+```
+
+dmesg shows clean SuperSpeed USB enumeration during the degraded
+period, so this is a libfobos / firmware-side state-corruption issue,
+not a kernel USB driver issue. The systemd unit for any edge service
+that drives the Fobos should run a `usbreset` pre-start step on any
+restart-after-failure path.
+
+### Sustained sync streaming has a libusb-9 cliff around 10–22 s
+
+`fobos_rx_read_sync` returns error `-9` (libusb error) after sustained
+streaming for ~10 s at 16 MSPS or ~22 s at 10 MSPS on the OPI5 +
+xhci-hcd combo. No corresponding kernel-side USB errors in dmesg —
+this is at user-space in libfobos's internal libusb bulk-transfer
+state machine.
+
+Suspect cause: synchronous file I/O inside the inner read loop chokes
+the USB pipeline. A consumer that writes to disk while reading IQ
+should use a background writer thread with a queue to decouple disk
+syscalls from the USB read path. The wrapper smoke test in
+`bench/wrapper_smoke.py` (no inside-loop writes) does NOT hit this at
+the same rates and durations, lending support to the I/O-choking-USB
+hypothesis.
+
+Not yet diagnosed at the libfobos level. Workarounds for now: keep
+sustained reads under ~20 s, or run a background writer queue, or
+both. A multi-band bulk capture session needs this resolved before it
+runs.
+
+### `pfobos/fwrapper.py:read_rx_sync` auto-stops sync mode on transient errors
+
+When the underlying C call returns a non-zero status, the wrapper
+calls `self.stop_rx_sync()` (setting `_sync_mode = False`) BEFORE
+re-raising as `FobosException`. A consumer that catches the
+`FobosException` and tries to keep reading will then get
+`RuntimeError: Synchronous mode not started` on the next call — sync
+state has already been torn down inside the exception handler.
+
+Workaround pattern:
+
+```python
+try:
+    iq = sdr.read_rx_sync()
+except FobosException:
+    # Wrapper auto-stopped sync; re-arm if you want to continue
+    if not sdr._sync_mode:
+        sdr.start_rx_sync(BUF_FLOATS)
+    continue
+```
+
+A real fix that drops the auto-stop semantics would be a breaking API
+change for existing consumers (rtanalyzer, fmreceiver, FobosIQSource);
+see the 2026-06-16 hardware-agent findings memo if you need to file
+the proposal.
+
+### SoapySDR.Device({"driver": "fobos"}) dict-form fails on Debian 13 SWIG bindings
+
+If you fall back to `sdr.backend: soapy` for non-Fobos hardware OR for
+debugging libfobos behind the SoapyFobosSDR module, the SoapySDR
+Python binding's `Device()` constructor has a SWIG-binding bug on
+Debian 13 / SoapySDR 0.8.1:
+
+```python
+# Fails on Debian 13 + python3-soapysdr 0.8.1 with:
+#   SoapySDR::Device::make() no match
+SoapySDR.Device({"driver": "fobos"})
+
+# Works (kwargs-string form):
+SoapySDR.Device(f"driver=fobos")
+```
+
+`SoapySDRUtil --make="driver=fobos"` (the C++ utility) opens the same
+device fine, so the bug is specific to the SWIG dict→Kwargs conversion
+path in `_SoapySDR.cpython-313-aarch64-linux-gnu.so`, not the underlying
+driver.
+
+Both forms are documented as valid upstream. Use the kwargs-string form
+in any new code; if you maintain code that uses the dict form, switch
+it on Debian 13 deployments. Reported by embedded-agent during the
+§3.5 soapy-fallback smoke on 2026-06-16.
+
 ## See also
 
 - `setup/aarch64/Dockerfile.build-aarch64` — builder image that produces the artifact set referenced above
 - `setup/aarch64/build-docker.sh` — script that runs the build and exports `lib/`, `include/`, `udev/`, `VERSIONS`
 - `pfobos/fwrapper.py::FobosSDR._load_library` — the discovery code itself
 - OpenSpec change `pfobos-as-primary-sdr-backend` (in `watchtower-specs`) — §4.2 of `tasks.md` is this document
+- Findings memo `bench/observation_mode_research/findings/findings-2026-06-16-session-1.md` — full context for the runtime gotchas above
