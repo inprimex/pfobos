@@ -34,7 +34,37 @@ class FobosException(Exception):
 
 
 class FobosSDR:
-    """Python wrapper for Fobos SDR library."""
+    """Python wrapper for Fobos SDR library.
+
+    Synchronous reception pattern (pfobos 0.3.0+):
+
+        sdr.start_rx_sync(buf_length)  # allocates buffer; sets _sync_mode = True
+        try:
+            while keep_going:
+                try:
+                    iq = sdr.read_rx_sync()  # complex64 ndarray
+                except FobosException as e:
+                    # Sync mode is still active. Decide what to do:
+                    #   - transient USB error (e.code == FobosError.LIBUSB): often safe to retry
+                    #   - persistent error: stop_rx_sync() + restart, or close
+                    if e.code == FobosError.LIBUSB:
+                        continue  # retry
+                    raise
+                process(iq)
+        finally:
+            sdr.stop_rx_sync()  # paired with start_rx_sync; caller-owned
+
+    read_rx_sync does NOT auto-stop sync mode on error. The caller owns
+    the start/stop lifecycle. See read_rx_sync docstring for the full
+    error-handling contract.
+
+    Asynchronous reception pattern:
+
+        def cb(iq_samples): ...  # called from C thread
+        sdr.start_rx_async(cb, buf_count=16, buf_length=32768)
+        # blocks until fobos_rx_cancel_async is called
+        sdr.stop_rx_async()
+    """
     
     def __init__(self, lib_path: str = None):
         self.ffi = FFI()
@@ -418,56 +448,64 @@ class FobosSDR:
 
     def read_rx_sync(self) -> np.ndarray:
         """Read samples in synchronous mode and return complex IQ array.
-        
+
+        Contract (pfobos 0.3.0+): on FobosException, sync mode remains
+        active. The caller decides whether to:
+
+          - Retry the read (cheap; transient USB hiccups often pass)
+          - Clean restart (stop_rx_sync() + start_rx_sync() explicitly)
+          - Give up and close (stop_rx_sync() + close())
+          - Escalate (propagate the exception up)
+
+        The original FobosException carrying the libfobos error code is
+        re-raised verbatim — callers can inspect `.code` to distinguish
+        transient errors (e.g. FobosError.LIBUSB = -9) from terminal
+        ones. The wrapper does NOT auto-stop sync mode on errors; that
+        decision is consumer-owned and matches the documented start/stop
+        lifecycle pattern in the class header.
+
         Returns:
-            np.ndarray: Complex IQ samples
-        
+            np.ndarray: Complex IQ samples (complex64).
+
         Raises:
-            RuntimeError: If synchronous mode not started
-            FobosException: If an error occurs during reading
+            RuntimeError: If synchronous mode not started (call start_rx_sync first).
+            FobosException: From libfobos errors (code preserved from C return).
         """
         self._check_device_open()
-        
+
         if not self._sync_mode or self._buffer_ptr is None:
             raise RuntimeError("Synchronous mode not started")
-        
+
         # Create pointer for actual length
         actual_len_ptr = self.ffi.new("uint32_t *")
-        
-        try:
-            # Read data into buffer
-            ret = self.lib.fobos_rx_read_sync(self.dev, self._buffer_ptr, actual_len_ptr)
-            self._check_error(ret)
-            
-            # Get actual number of samples read
-            actual_len = actual_len_ptr[0]
-            
-            if actual_len == 0:
-                # No data received
-                return np.array([], dtype=np.complex64)
-            
-            if actual_len > self._buffer_length * 2:
-                # Sanity check - shouldn't happen if C library is behaving
-                actual_len = self._buffer_length * 2
 
-            # Copy C buffer into numpy array via memoryview (avoids Python loop)
-            buffer = np.frombuffer(
-                self.ffi.buffer(self._buffer_ptr, actual_len * 4), dtype=np.float32
-            ).copy()
+        # Read data into buffer. _check_error raises FobosException with the
+        # original code from libfobos on ret < 0; we let it propagate without
+        # tearing down sync state — caller owns recovery (see contract above).
+        ret = self.lib.fobos_rx_read_sync(self.dev, self._buffer_ptr, actual_len_ptr)
+        self._check_error(ret)
 
-            # Make sure length is even for complex conversion
-            if len(buffer) % 2 != 0:
-                buffer = buffer[:-1]
-            
-            # Create complex array from interleaved I/Q data
-            iq_samples = buffer[0::2] + 1j * buffer[1::2]
-            
-            return iq_samples
-            
-        except Exception as e:
-            # Make sure to stop sync mode if an error occurs to avoid device hanging
-            self.stop_rx_sync()
-            raise FobosException(-1, f"Error in read_rx_sync: {e}")
+        actual_len = actual_len_ptr[0]
+
+        if actual_len == 0:
+            # No data received
+            return np.array([], dtype=np.complex64)
+
+        if actual_len > self._buffer_length * 2:
+            # Sanity check — shouldn't happen if C library is behaving
+            actual_len = self._buffer_length * 2
+
+        # Copy C buffer into numpy array via memoryview (avoids Python loop)
+        buffer = np.frombuffer(
+            self.ffi.buffer(self._buffer_ptr, actual_len * 4), dtype=np.float32
+        ).copy()
+
+        # Make sure length is even for complex conversion
+        if len(buffer) % 2 != 0:
+            buffer = buffer[:-1]
+
+        # Create complex array from interleaved I/Q data
+        return buffer[0::2] + 1j * buffer[1::2]
 
     def stop_rx_sync(self):
         """Stop synchronous receiving mode."""
