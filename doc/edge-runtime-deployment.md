@@ -448,11 +448,132 @@ sample_completion_pct:   23.9%
 end_state:               Fobos error -9: libusb error
 ```
 
-The writer-queue refactor still helped (5.8× duration improvement
-over the pre-fix 10.79 s cliff at the same rate) — the bottleneck just
+The writer-queue refactor (pfobos PR #12) decoupled the libfobos read
+from the disk syscall and shifted the cliff timing 5.8× later vs the
+pre-fix 10.79 s. But the cliff itself still fires — the bottleneck
 moved from "syscall stalls inner loop" to "disk capacity ceiling".
-Further script-level fixes are diminishing returns; the right path is
-faster underlying storage.
+
+### Beyond the SD card: tmpfs-as-core capture path
+
+Operator-confirmed pattern on 2026-06-17: captures should write into
+a tmpfs (RAM-backed filesystem, ≫1 GB/s) and a separate post-capture
+step rsyncs to persistent storage (NVMe / NAS / S3). This is the
+**core capture-path architecture, not a fallback**:
+
+- RAM is faster than any persistent tier. NVMe at ~1 GB/s sustained
+  is 10–50× slower than DDR4. Capture-to-RAM is the only writeable
+  target that's never the disk-side bottleneck.
+- Decouples capture wall-clock from persistence wall-clock. The SDR
+  read pipeline runs at libfobos's USB delivery rate; persistence
+  happens after, at whatever the storage backend supports.
+- Storage-tier-agnostic. Same capture path works whether persistence
+  is NVMe, SD, NAS, or S3.
+- Simpler error model. If persistence fails (disk full, rsync hang,
+  NAS unreachable), the IQ is in tmpfs until explicitly flushed.
+
+`bench/observation_mode_research/capture_noise.py` is designed for this
+pattern out of the box — `--out-dir` points at any directory; tmpfs
+is the recommended target for capture sessions.
+
+### The libusb-9 cliff is upstream of disk
+
+**Validated 2026-06-17 on OPI5-1.** Running capture_noise.py against
+a tmpfs target at three rates, with the hwtel module sampling thermal
+zones and CPU frequency at 0.5 s intervals:
+
+| run | rate | duration captured | total samples | eff rate | queue_full_blocks | end state |
+|---|---:|---:|---:|---:|---:|---|
+| tmpfs 16 MSPS | 16 | ~6 s eff | 108 M | 12.7 MSPS | **0** | libusb-9 |
+| tmpfs 10 MSPS | 10 | 3.96 s | 19 M | 4.79 MSPS | **0** | libusb-9 |
+| tmpfs 8 MSPS  | 8  | 21.86 s | 86 M | 3.92 MSPS | **0** | libusb-9 |
+
+**`queue_full_blocks: 0` on every tmpfs run** — the writer queue
+NEVER stalled. Tmpfs is bandwidth-unbounded relative to libfobos's
+output rate. Yet libusb-9 still fires.
+
+**The cliff is not primarily disk-bandwidth-bound.** Tmpfs proves
+disk can be infinitely fast and the cliff still fires at all rates.
+
+### Why thermal is NOT the cause
+
+The `pfobos-noise-capture/2` schema added by pfobos PR #15 carries
+thermal + CPU-freq + loadavg trajectories in the sidecar so any
+performance finding can be checked against the hardware environment
+that produced it. Telemetry from the 2026-06-17 8 MSPS / 21.86 s
+clean session (RK3588 thermal zones, °C):
+
+| zone | min | max | delta |
+|---|---:|---:|---:|
+| soc-thermal | 54.5 | 55.5 | 1.0 |
+| bigcore0-thermal | 55.5 | 56.4 | 0.9 |
+| bigcore1-thermal | 55.5 | 57.3 | 1.8 |
+| littlecore-thermal | 55.5 | 56.4 | 0.9 |
+| center-thermal | 53.6 | 55.5 | 1.9 |
+| gpu-thermal | 53.6 | 54.5 | 0.9 |
+| npu-thermal | 54.5 | 55.5 | 1.0 |
+
+Max delta across all 7 zones during a libusb-9-firing capture:
+**1.8 °C**. RK3588 throttles at 85 °C+. We're at less than two-thirds
+of the throttle threshold and thermal barely moves under load.
+**Thermal throttling is ruled out.**
+
+### Leading hypothesis: cpufreq scaling on xhci-handling cores
+
+The same telemetry shows the A76 cluster (cpu4-7, pinned to the
+watchtower-edge container via `CpusetCpus=4-7`) scaling between
+408 MHz and 2304 MHz dynamically mid-capture — delta 1896 MHz.
+The A55 cluster (cpu0-3, where the capture script runs since the
+A76 cores are pinned to the container) stays pegged at 1800 MHz —
+no scaling, no throttling.
+
+```
+cpu freq trajectory at 4 s intervals during capture:
+  t_s    cpu0 (A55)    cpu4 (A76)
+   0.0      1800 MHz      2304 MHz
+   4.0      1800 MHz       600 MHz   ← A76 idled mid-capture
+   8.0      1800 MHz      2304 MHz
+  12.1      1800 MHz       408 MHz   ← A76 dropped further
+  16.1      1800 MHz      2304 MHz
+  20.1      1800 MHz      2304 MHz   (just before -9 fired)
+```
+
+The capture script doesn't run on the A76 cores. But `xhci-hcd`
+interrupt servicing in the kernel can run on any CPU per the IRQ
+affinity mask. **If a USB interrupt lands on a 408 MHz-clocked core,
+servicing latency goes up ~6× vs the same interrupt on a 2304 MHz
+core.** Over a multi-second sustained-read window, accumulated
+servicing latency could overflow libfobos's internal USB ring buffer
+and trigger the -9.
+
+This is currently a hypothesis, not a measured cause. Two experiments
+would confirm or refute it:
+
+- **Pin `xhci-hcd` IRQ to a high-freq core** via
+  `/proc/irq/<n>/smp_affinity`. Cleanest test — if pinning to a core
+  that never scales down (e.g. A55 at 1800 MHz steady, or A76 with
+  forced performance governor) eliminates the cliff, we have both the
+  diagnosis AND the fix in one shot. Reversible by restoring the
+  original mask. Doesn't disrupt running containers.
+- **Pause the edge container and re-test.** Confirms "the container
+  contributes" but doesn't isolate cpufreq from RAM contention or
+  other co-located effects. Useful as a backup if the IRQ pin doesn't
+  pan out.
+
+Both modify kernel runtime state and fall outside the usual
+"device-only-touched" lease envelope. Should be done with explicit
+operator sign-off the first time.
+
+### State of the §5.3 investigation
+
+| factor | status | evidence |
+|---|---|---|
+| Writer-side queue stalls disk I/O | ✓ confirmed contributing factor | SD card run had queue_full_blocks=202 |
+| Disk bandwidth ceiling on SD | ✓ confirmed contributing factor on SD | 30 MB/s vs 128 MB/s demand |
+| tmpfs lifts writer-side ceiling | ✓ confirmed | queue_full_blocks=0 on all three rates |
+| libusb-9 persists at any disk speed | ✓ confirmed | cliff still fires at 8/10/16 MSPS on tmpfs |
+| Thermal throttling | ✗ ruled out by telemetry | max delta 1.8 °C; threshold is 85 °C+ |
+| cpufreq scaling on xhci cores | OPEN (leading hypothesis) | A76 freq delta 1896 MHz during capture |
+| libfobos internal buffer overflow | OPEN | possible secondary mechanism even if xhci interrupts are perfectly serviced |
 
 ## See also
 
