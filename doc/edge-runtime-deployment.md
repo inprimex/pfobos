@@ -158,52 +158,109 @@ not a kernel USB driver issue. The systemd unit for any edge service
 that drives the Fobos should run a `usbreset` pre-start step on any
 restart-after-failure path.
 
-### Sustained sync streaming has a libusb-9 cliff around 10–22 s
+### Sustained sync streaming has a libusb-9 cliff (chunk-size-dependent)
 
 `fobos_rx_read_sync` returns error `-9` (libusb error) after sustained
-streaming for ~10 s at 16 MSPS or ~22 s at 10 MSPS on the OPI5 +
-xhci-hcd combo. No corresponding kernel-side USB errors in dmesg —
-this is at user-space in libfobos's internal libusb bulk-transfer
-state machine.
+streaming. The cliff timing is chunk-size-dependent:
 
-Suspect cause: synchronous file I/O inside the inner read loop chokes
-the USB pipeline. A consumer that writes to disk while reading IQ
-should use a background writer thread with a queue to decouple disk
-syscalls from the USB read path. The wrapper smoke test in
-`bench/wrapper_smoke.py` (no inside-loop writes) does NOT hit this at
-the same rates and durations, lending support to the I/O-choking-USB
-hypothesis.
+- ~10 s at 16 MSPS with `start_rx_sync(65536)` (32 768 IQ pairs per chunk)
+- ~22 s at 10 MSPS with `start_rx_sync(65536)`
+- ~2.5 s at 50 MSPS with `start_rx_sync(131072)` (65 536 IQ pairs)
+  — observed by embedded-agent on watchtower-edge's `FobosIQSource`
+  sustained-read bench, bus `20260616T222139`
 
-Not yet diagnosed at the libfobos level. Workarounds for now: keep
-sustained reads under ~20 s, or run a background writer queue, or
-both. A multi-band bulk capture session needs this resolved before it
-runs.
+Larger per-call chunks trigger the cliff sooner. Suspect: the device's
+internal USB ring buffer overruns faster at larger per-call payload, OR
+libfobos's buffer wrap-around hits an edge case earlier.
 
-### `pfobos/fwrapper.py:read_rx_sync` auto-stops sync mode on transient errors
+No corresponding kernel-side USB errors in dmesg — user-space only, in
+libfobos's internal libusb bulk-transfer state machine.
 
-When the underlying C call returns a non-zero status, the wrapper
-calls `self.stop_rx_sync()` (setting `_sync_mode = False`) BEFORE
-re-raising as `FobosException`. A consumer that catches the
-`FobosException` and tries to keep reading will then get
+Mitigations available today:
+
+- **Background writer queue** for consumers that write IQ to disk
+  while reading. `bench/observation_mode_research/capture_noise.py`
+  uses this pattern — the read loop posts numpy arrays into a bounded
+  `queue.Queue` and a dedicated writer thread drains it onto disk. The
+  bench's wrapper smoke (`bench/wrapper_smoke.py`, no inside-loop
+  writes) does NOT hit the cliff at 10 MSPS / 5 s, supporting the
+  I/O-choking-USB hypothesis.
+- **Short sustained windows** of <10 s if no disk write is involved.
+- **Multi-segment captures spliced via the consumer-side sidecar
+  `files[]` array** — embedded-agent's
+  `noise_capture_ingest.py` is gap-tolerant per segment.
+
+Not yet diagnosed at the libfobos level. A parameter sweep across
+chunk_size + sample_rate + duration is queued for a future §5.3
+diagnostic deep-dive if the background-writer mitigation doesn't fully
+dodge the cliff.
+
+### Post-libusb-9, libfobos internally NULLs the device handle
+
+When `fobos_rx_read_sync` returns `-9`, libfobos's internal state
+machine sets its `dev` pointer to NULL while pfobos's Python-side
+`_sync_mode` flag stays `True` (correctly, per the 0.3.0 contract —
+sync mode is consumer-managed). A caller that retries `read_rx_sync`
+after the `-9` then gets:
+
+    FobosException(code=-1, message="No device spesified, dev == NUL")
+
+This is a REAL FobosException with a real C error code; it's NOT the
+pre-0.3.0 spurious `RuntimeError: Synchronous mode not started`. It IS
+a libfobos behavior worth understanding, because:
+
+- The error message is confusing — the device IS specified at the
+  Python level; libfobos's internal `dev` got nulled.
+- A caller that wanted to ride out libusb hiccups can't, because the
+  device handle is gone. The recovery path is `stop_rx_sync()` +
+  `close()` + `usbreset 16d0:132e` + `open()` + `start_rx_sync()`.
+- pfobos does not currently expose a "rebind dev after libfobos
+  internal teardown" path. If one is needed, file a proposal.
+
+Found 2026-06-16 by embedded-agent during the
+`pfobos-read-rx-sync-no-auto-stop-on-error` §3.4 integration smoke
+(bus `20260616T222139`). Not a 0.3.0 contract violation — banked as
+a libfobos behavior note.
+
+### `read_rx_sync` error-handling contract (pfobos 0.3.0+)
+
+The pre-0.3.0 wrapper auto-stopped sync mode on any C error inside
+`read_rx_sync`, then re-raised as `FobosException`. A consumer that
+caught the exception and tried to keep reading hit
 `RuntimeError: Synchronous mode not started` on the next call — sync
-state has already been torn down inside the exception handler.
+state had been torn down inside the exception handler.
 
-Workaround pattern:
+**Fixed in pfobos 0.3.0** via OpenSpec change
+`pfobos-read-rx-sync-no-auto-stop-on-error`. The new contract:
+
+- `read_rx_sync` does NOT auto-stop sync mode on errors.
+- The original `FobosException` propagates with its libfobos error
+  code intact (no more `-1` wrapping; you see `.code == -9` for
+  `LIBUSB`, etc.).
+- The caller decides: retry, restart, close, or escalate.
+
+Recommended pattern for sustained readers:
 
 ```python
+sdr.start_rx_sync(buf_length)
 try:
-    iq = sdr.read_rx_sync()
-except FobosException:
-    # Wrapper auto-stopped sync; re-arm if you want to continue
-    if not sdr._sync_mode:
-        sdr.start_rx_sync(BUF_FLOATS)
-    continue
+    while keep_going:
+        try:
+            iq = sdr.read_rx_sync()
+        except FobosException as e:
+            if e.code == FobosError.LIBUSB:  # -9, transient USB hiccup
+                continue
+            raise
+        process(iq)
+finally:
+    sdr.stop_rx_sync()
 ```
 
-A real fix that drops the auto-stop semantics would be a breaking API
-change for existing consumers (rtanalyzer, fmreceiver, FobosIQSource);
-see the 2026-06-16 hardware-agent findings memo if you need to file
-the proposal.
+If you depend on the pre-0.3.0 auto-stop side effect (you skipped
+calling `stop_rx_sync` explicitly because you assumed the wrapper did
+it), update your error path to call `stop_rx_sync` explicitly OR
+adopt the pattern above. The migration is detailed in
+`CHANGELOG.md`.
 
 ### SoapySDR.Device({"driver": "fobos"}) dict-form fails on Debian 13 SWIG bindings
 
