@@ -300,34 +300,132 @@ to trigger the libusb-9 cliff at ~63 s wall-clock (despite the
 background-writer queue in `bench/observation_mode_research/capture_noise.py`
 that decouples the libfobos read from the disk syscall).
 
-| storage | sustained write | suitable for |
+### Two distinct storage roles
+
+The OPI5 plays two different roles in this project and they have very
+different storage needs:
+
+| role | what it does | working storage need |
 |---|---|---|
-| SD card on OPI5 (Class 10 / mmcblk1) | ~30 MB/s | OS + small writes ONLY |
-| tmpfs (RAM-backed) | ≫1 GB/s | dev / one-shot capture sessions; size-limited by RAM |
-| eMMC | ~100–200 MB/s | situational — depends on board variant |
-| M.2 NVMe SSD over PCIe | ≫1 GB/s | production target |
+| **Deployed edge node** | runs `watchtower-edge` inference: reads IQ via `FobosIQSource`, runs WST → CFAR → ML pipeline, emits `DetectionReport` over MQTT. IQ is processed and discarded; only model weights, logs, detection metadata, and occasional triggered captures land on disk. | **~50 GB working space** — 128–256 GB drive is ample |
+| **Research / dev bench** | runs bulk noise corpus captures, calibration sweeps, ML offline analysis. Sustained IQ-to-disk for minutes at a time. | **~250+ GB working space** — 1 TB+ drive recommended, sustained write critical |
+
+The libusb-9 cliff problem is bench territory. Production edge nodes
+don't sustain-write IQ to disk in the inference path, so the cliff
+doesn't apply to them. The storage class table below reflects this:
+
+| storage | sustained write | edge node | research bench |
+|---|---|---|---|
+| SD card (Class 10 / mmcblk1) | ~30 MB/s | ✗ OS+small writes only | ✗ |
+| tmpfs (RAM-backed) | ≫1 GB/s | ✗ no persistence | ✓ short sessions, ≤RAM size |
+| eMMC | ~100–200 MB/s | ✓ situational, board-dependent | ✗ insufficient sustained |
+| M.2 NVMe (256 GB, Apacer-class) | ~400 MB/s sustained, ~1.3 GB/s burst | ✓ ample at any tier | ✓ adequate for 16 MSPS |
+| M.2 NVMe (1 TB, Apacer-class) | ~800 MB/s sustained, ~1.5 GB/s burst | ✓ overspecced but fine | ✓ comfortable at 50 MSPS |
+
+### Validated / target hardware
+
+For the dev bench at the time of writing, the target drive is
+**Apacer AS2280P4-1 256 GB (`AP256GAS2280P4-1`)** — industrial-grade
+M.2 2280 NVMe, PCIe Gen 3 x4, DRAM cache, TLC NAND, -40 to +85 °C
+operating range, optional PLP variant available.
+
+Same drive ports to a field-deployed edge node without re-spec'ing —
+the industrial temp range + PLP option future-proof the choice across
+both roles.
+
+#### Predicted speedup vs SD card (pending hardware validation)
+
+Apacer datasheet specs for the 256 GB SKU + workload analysis:
+
+| metric | SD card (measured 2026-06-17) | Apacer AS2280P4-1 256 GB (predicted) | speedup |
+|---|---|---|---|
+| Sequential write burst | n/a | ~1300 MB/s | — |
+| Sustained write after SLC cache exhausts | 30 MB/s | ~400 MB/s (estimated, capacity-bound on 256 GB SKU) | **~13×** |
+| 16 MSPS / 60 s capture | `ok: false`, 23.9% completion, cliff at 63 s | `ok: true`, ~100% completion, **no cliff expected** | qualitative — unlocks the workload |
+| 50 MSPS / 60 s capture | cliff at 2.5–10 s (chunk-size-dependent, per embedded-agent `20260616T222139`) | 60 s clean **OR** cliff at 30–45 s | best case ~10–25× |
+| 6-band E1.2/E1.3 noise-capture session (~46 GB total) | impossible | ~30–40 min straightforward session | qualitative — unlocks E1.2/E1.3 |
+
+The 16 MSPS case is high confidence: 60 s × 128 MB/s = 7.7 GB total
+write fits comfortably within the 256 GB drive's dynamic SLC cache
+(~16–32 GB on Phison E12S / SMI 2263 class controllers). The drive
+writes at near-burst speeds throughout, far above the 128 MB/s libfobos
+produces.
+
+The 50 MSPS case is medium confidence: 24 GB written over 60 s likely
+exceeds the SLC cache mid-capture, dropping the drive to TLC native
+write (~400 MB/s estimated for this capacity). At the device's 400 MB/s
+sustained rate the headroom is tight — if TLC native lands below
+400 MB/s, the cliff returns, just at 30–45 s instead of 10 s. If you
+need rock-solid 50 MSPS sustained, bump to the 1 TB SKU; sustained
+write scales roughly linearly with capacity on TLC drives because more
+NAND channels run in parallel.
+
+#### What needs validation post-install
+
+When the drive is mounted on OPI5-1 (next hardware lease):
+
+1. **Quick `fio` baseline** — sequential write at 4 KB and 1 MB block
+   sizes, 30 s duration, confirms the OPI5's PCIe Gen 3 x4
+   implementation reaches the datasheet specs (RK3588 PCIe lands at
+   80–90% of theoretical typically).
+2. **16 MSPS / 60 s `capture_noise.py` re-run** at 868 MHz / quiet_lab,
+   same script as the SD-card baseline. Expected: `ok: true`,
+   `queue_full_blocks: 0`, ~100% sample completion. Direct apples-to-
+   apples vs `868MHz_16MSPS_quiet_lab_20260617T164623Z`.
+3. **50 MSPS / 60 s stress test** — same band, same gain, same script.
+   Maps the upper end of the sustained-write envelope. Either the cliff
+   stays away (drive headroom validates) or it shifts to 30–45 s
+   (TLC-native sustained measured; decide whether to upgrade SKU for
+   50 MSPS work).
+4. **One band of the actual E1.2/E1.3 capture per embedded-agent's
+   spec** — converts validation into a deliverable. 60 s @ 16 MSPS at
+   one of the spec bands (e.g. 868 MHz), full sidecar JSON, delivered
+   to embedded-agent for the PD@PFA pipeline.
+
+The four steps fit inside one ~15-minute hardware lease.
 
 ### Capture session recipes
 
-**Dev / research session** — mount tmpfs as the capture target, run the
-capture, rsync off before unmount:
+**Dev / research session (NVMe target)** — mount the drive and run
+captures directly to the mount point. No tmpfs rotation needed at
+16 MSPS:
+
+```bash
+# One-time setup (operator side):
+#   - Install M.2 NVMe (Apacer AS2280P4-1 or similar)
+#   - mkfs.ext4 /dev/nvme0n1p1
+#   - Add to /etc/fstab: /dev/nvme0n1p1 /mnt/nvme ext4 defaults,noatime 0 2
+#   - sudo mount -a
+
+uv run python bench/observation_mode_research/capture_noise.py \
+    --freq 868e6 --rate 16e6 --duration 60 \
+    --env quiet_lab --antenna "<descriptor>" \
+    --out-dir /mnt/nvme/noise_captures
+```
+
+The `noatime` mount option matters — default `relatime` writes a 4 KB
+timestamp metadata update per file open, which on a 500k-sample-per-file
+workload adds up. `noatime` removes that overhead.
+
+**Dev / research session (tmpfs fallback)** — if the NVMe isn't yet
+installed, tmpfs + rsync rotation works for short windows:
 
 ```bash
 sudo mkdir -p /mnt/capture-tmp
 sudo mount -t tmpfs -o size=4G tmpfs /mnt/capture-tmp
-# Run the capture pointing --out-dir at the tmpfs:
 uv run python bench/observation_mode_research/capture_noise.py \
     --freq 868e6 --rate 16e6 --duration 60 \
     --env quiet_lab --antenna "<descriptor>" \
     --out-dir /mnt/capture-tmp
-# Rsync to a persistent destination:
 rsync -a /mnt/capture-tmp/ \
     ~/watchtower-edge-pfobos/bench/observation_mode_research/noise_captures/
 sudo umount /mnt/capture-tmp
 ```
 
 Plan tmpfs size for ~7.7 GB per band at 16 MSPS / 60 s. Multi-band
-sessions: rsync between bands, or scale tmpfs to the per-band budget.
+sessions: rsync between bands, or scale tmpfs to the per-band budget
+(OPI5 typically has 8–16 GB RAM total; don't starve the inference
+pipeline).
 
 **Production / operational** — provision the edge image with an M.2
 NVMe SSD as the capture destination. The same `--out-dir` flag points
