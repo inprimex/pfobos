@@ -517,51 +517,106 @@ Max delta across all 7 zones during a libusb-9-firing capture:
 of the throttle threshold and thermal barely moves under load.
 **Thermal throttling is ruled out.**
 
-### Leading hypothesis: cpufreq scaling on xhci-handling cores
+### Cause confirmed: watchtower-edge container contention
 
-The same telemetry shows the A76 cluster (cpu4-7, pinned to the
-watchtower-edge container via `CpusetCpus=4-7`) scaling between
-408 MHz and 2304 MHz dynamically mid-capture — delta 1896 MHz.
-The A55 cluster (cpu0-3, where the capture script runs since the
-A76 cores are pinned to the container) stays pegged at 1800 MHz —
-no scaling, no throttling.
+Validated 2026-06-18 with two experiments back-to-back on OPI5-1.
 
+| run | edge container | governor | end state | duration | samples |
+|---|---|---|---|---:|---:|
+| baseline (2026-06-17) | running | ondemand | libusb-9 | 21.86 s | 86 M |
+| experiment B (perf gov) | running | **performance** | libusb-9 | **2.72 s** | 10 M |
+| experiment A (edge paused) | **paused** | ondemand | **NO ERROR ✓** | **30.02 s** | **113.7 M** |
+
+Pausing the watchtower-edge container eliminates the cliff entirely.
+Capture ran to the requested 30 s deadline cleanly with
+`queue_full_blocks: 0` and no `Fobos error -9`.
+
+The contention mechanism is not yet precisely localized — could be
+CPU scheduling, memory bandwidth, USB bus interference from
+container-side activity, soft-IRQ context migration, or some
+combination — but the **trigger** is unambiguously the container's
+runtime presence on this OPI5+Fobos+libfobos+kernel combo.
+
+### Operational pattern: docker pause for bulk captures
+
+Recommended pattern for any bulk sustained-capture session on a host
+running the watchtower-edge inference container:
+
+```bash
+docker pause watchtower-edge-edge-1
+# ... bulk capture loop, all bands ...
+docker unpause watchtower-edge-edge-1
 ```
-cpu freq trajectory at 4 s intervals during capture:
-  t_s    cpu0 (A55)    cpu4 (A76)
-   0.0      1800 MHz      2304 MHz
-   4.0      1800 MHz       600 MHz   ← A76 idled mid-capture
-   8.0      1800 MHz      2304 MHz
-  12.1      1800 MHz       408 MHz   ← A76 dropped further
-  16.1      1800 MHz      2304 MHz
-  20.1      1800 MHz      2304 MHz   (just before -9 fired)
-```
 
-The capture script doesn't run on the A76 cores. But `xhci-hcd`
-interrupt servicing in the kernel can run on any CPU per the IRQ
-affinity mask. **If a USB interrupt lands on a 408 MHz-clocked core,
-servicing latency goes up ~6× vs the same interrupt on a 2304 MHz
-core.** Over a multi-second sustained-read window, accumulated
-servicing latency could overflow libfobos's internal USB ring buffer
-and trigger the -9.
+The pause is fast (sub-second), reversible, and leaves the container's
+process state intact (no restart, no reload of model weights, no
+MQTT reconnect). For research / dev sessions on a node also running
+inference this is the cleanest viable operational pattern.
 
-This is currently a hypothesis, not a measured cause. Two experiments
-would confirm or refute it:
+**Production deployments are not affected.** Triggered captures in the
+operational path are short bursts (≤2 s typically) that fit comfortably
+within the cliff window even with the container running at full load.
+Only sustained captures (≥5–20 s depending on rate) hit the cliff.
 
-- **Pin `xhci-hcd` IRQ to a high-freq core** via
-  `/proc/irq/<n>/smp_affinity`. Cleanest test — if pinning to a core
-  that never scales down (e.g. A55 at 1800 MHz steady, or A76 with
-  forced performance governor) eliminates the cliff, we have both the
-  diagnosis AND the fix in one shot. Reversible by restoring the
-  original mask. Doesn't disrupt running containers.
-- **Pause the edge container and re-test.** Confirms "the container
-  contributes" but doesn't isolate cpufreq from RAM contention or
-  other co-located effects. Useful as a backup if the IRQ pin doesn't
-  pan out.
+### Second-order finding: effective rate ~50% of nominal
 
-Both modify kernel runtime state and fall outside the usual
-"device-only-touched" lease envelope. Should be done with explicit
-operator sign-off the first time.
+The same experiments surfaced an independent issue: at the
+**capture-paused** run that completed cleanly, the effective sample rate
+was 113.7 M / 30.02 s = 3.79 MSPS for a requested 8 MSPS — **47%** of
+nominal. The same shortfall (49%) appeared in the baseline-running run.
+
+This is NOT cliff-related (same ratio whether edge runs or pauses) and
+NOT thermal-related. It's an independent libfobos / Fobos / USB behavior
+worth investigating later. Hypotheses to test (priority order):
+
+1. **libfobos `actual_len` reporting** — does `fobos_rx_read_sync` set
+   `actual_len[0]` to less than the requested buffer?
+2. **USB transfer count per polling interval** — does
+   `start_rx_sync(buf_length=N)` actually allocate the full N, or does
+   libfobos halve it internally for some safety margin?
+3. **Fobos firmware halving rate internally** — requires firmware-side
+   instrumentation; lowest priority.
+
+Tracked as a separate thread (embedded-agent bus `20260617T220626`),
+not blocking the bulk noise-capture session.
+
+### Hypotheses falsified along the way
+
+Worth documenting so the next agent who hits a similar cliff knows
+what's already been ruled out and doesn't repeat the experiments.
+
+| hypothesis | experiment that killed it | evidence |
+|---|---|---|
+| Disk bandwidth ceiling is the primary cause | tmpfs capture (RAM target, ≫1 GB/s) | Cliff still fires at 8/10/16 MSPS on tmpfs; `queue_full_blocks: 0` on every tmpfs run |
+| Thermal throttling on passive-cooled OPI5 | hwtel-instrumented capture | Max 1.8 °C delta across all 7 RK3588 zones during a cliff-firing capture; threshold is 85 °C+ |
+| cpufreq scaling on xhci-handling cores | All-CPU performance governor + xhci IRQ already on cpu0 (A55 1800 MHz steady) | Performance governor made the cliff fire **8× faster** (2.72 s vs 21.86 s baseline); IRQ 87 was already landing 100% on cpu0 by default |
+
+### Why thermal is NOT the cause (telemetry detail)
+
+The `pfobos-noise-capture/2` schema added by pfobos PR #15 carries
+thermal + CPU-freq + loadavg trajectories in the sidecar so any
+performance finding can be checked against the hardware environment
+that produced it. Telemetry from the 2026-06-17 8 MSPS / 21.86 s
+cliff-firing run (RK3588 thermal zones, °C):
+
+| zone | min | max | delta |
+|---|---:|---:|---:|
+| soc-thermal | 54.5 | 55.5 | 1.0 |
+| bigcore0-thermal | 55.5 | 56.4 | 0.9 |
+| bigcore1-thermal | 55.5 | 57.3 | 1.8 |
+| littlecore-thermal | 55.5 | 56.4 | 0.9 |
+| center-thermal | 53.6 | 55.5 | 1.9 |
+| gpu-thermal | 53.6 | 54.5 | 0.9 |
+| npu-thermal | 54.5 | 55.5 | 1.0 |
+
+Max delta across all 7 zones during a libusb-9-firing capture:
+**1.8 °C**. RK3588 throttles at 85 °C+. We're at less than two-thirds
+of the throttle threshold and thermal barely moves under load.
+
+The 2026-06-18 edge-paused capture confirmed independently: thermal
+dropped 4 °C (50–53 °C vs 54–57 °C baseline) — the edge container is
+the primary heat source on this passively-cooled OPI5, but even with
+that heat, we're nowhere near the throttle threshold.
 
 ### State of the §5.3 investigation
 
@@ -569,11 +624,12 @@ operator sign-off the first time.
 |---|---|---|
 | Writer-side queue stalls disk I/O | ✓ confirmed contributing factor | SD card run had queue_full_blocks=202 |
 | Disk bandwidth ceiling on SD | ✓ confirmed contributing factor on SD | 30 MB/s vs 128 MB/s demand |
-| tmpfs lifts writer-side ceiling | ✓ confirmed | queue_full_blocks=0 on all three rates |
-| libusb-9 persists at any disk speed | ✓ confirmed | cliff still fires at 8/10/16 MSPS on tmpfs |
-| Thermal throttling | ✗ ruled out by telemetry | max delta 1.8 °C; threshold is 85 °C+ |
-| cpufreq scaling on xhci cores | OPEN (leading hypothesis) | A76 freq delta 1896 MHz during capture |
-| libfobos internal buffer overflow | OPEN | possible secondary mechanism even if xhci interrupts are perfectly serviced |
+| tmpfs lifts writer-side ceiling | ✓ confirmed | queue_full_blocks=0 on all rates |
+| libusb-9 persists at any disk speed | ✓ confirmed | cliff fires at 8/10/16 MSPS on tmpfs |
+| Thermal throttling | ✗ ruled out by telemetry | max delta 1.8 °C; threshold 85 °C+ |
+| cpufreq scaling on xhci cores | ✗ ruled out by experiment | perf gov made cliff 8× WORSE, not better |
+| **watchtower-edge container contention** | ✓ **CONFIRMED CAUSE** | docker pause → no cliff at 30 s |
+| Effective rate ~50% of nominal | OPEN (second-order, not cliff-related) | 47–49% ratio with both edge running and paused |
 
 ## See also
 
