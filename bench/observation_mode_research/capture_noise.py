@@ -6,12 +6,17 @@ Captures `--duration` seconds of raw IQ at the device's native rate, splits
 into 500k-IQ-sample files (per embedded-agent's bus 20260611T121717 spec),
 and writes a sibling JSON sidecar with all metadata.
 
-Schema produced: `pfobos-noise-capture/1`. Consumer-side parser:
+Schema produced: `pfobos-noise-capture/2`. Consumer-side parser:
 `watchtower-edge/bench/observation_mode_research/noise_capture_ingest.py`
 (embedded-agent, watchtower-edge PR #15) validated end-to-end against the
 2026-06-16 partial captures — 15 unit tests + a CLI smoke that recovers
 RMS p50 = 0.0005 from the 22 s 868 MHz quiet-lab capture, consistent with
 the LNA=1/VGA=8 noise floor.
+
+Schema bump 1→2: added `hwtel` block carrying thermal-zone + CPU-freq +
+load-average time series sampled at `--hwtel-interval` seconds throughout
+the capture. Lets consumers correlate libusb-9 cliff timing with
+thermal throttling / CPU contention on passively-cooled OPI5 deployments.
 
 ## Background writer architecture (since 2026-06-17 refactor)
 
@@ -70,6 +75,8 @@ from pathlib import Path
 import numpy as np
 
 from pfobos import FobosSDR, FobosException
+
+from bench.observation_mode_research.hwtel import HwTelemetry
 
 
 SAMPLES_PER_CHUNK_FILE = 500_000   # IQ samples per .iq file (embedded-agent's chunk-size)
@@ -162,8 +169,12 @@ def capture(args: argparse.Namespace) -> int:
     sdr.set_lna_gain(args.lna_gain)
     sdr.set_vga_gain(args.vga_gain)
 
+    # Hardware telemetry sampler — thermal zones + CPU freq + load.
+    # Captures the environment the IQ was recorded in so we can correlate
+    # libusb-9 cliff timing with thermal throttling / CPU contention.
+    hwtel = HwTelemetry(interval_s=args.hwtel_interval)
     metadata = {
-        "schema": "pfobos-noise-capture/1",
+        "schema": "pfobos-noise-capture/2",
         "base": base,
         "started_utc": _now_utc_iso(),
         "host": os.uname().nodename,
@@ -183,6 +194,13 @@ def capture(args: argparse.Namespace) -> int:
             "antenna": args.antenna,
             "environment_tag": args.env,
             "requested_duration_s": args.duration,
+        },
+        "hwtel": {
+            "interval_s": args.hwtel_interval,
+            "zones": hwtel.zones,
+            "cpus": hwtel.cpus,
+            "samples": [],
+            "summary": {},
         },
         "files": [],
         "samples_per_file": SAMPLES_PER_CHUNK_FILE,
@@ -220,6 +238,7 @@ def capture(args: argparse.Namespace) -> int:
     writer.start()
 
     sdr.start_rx_sync(SYNC_BUF_FLOATS)
+    hwtel.start()
     interrupted = False
 
     def _on_signal(signum, _frame):
@@ -335,6 +354,8 @@ def capture(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
+    metadata["hwtel"]["samples"] = hwtel.stop()
+    metadata["hwtel"]["summary"] = hwtel.summary()
     metadata["files"] = files_record
     metadata["writer"]["queue_full_blocks"] = queue_full_count[0]
     metadata["finished_utc"] = _now_utc_iso()
@@ -343,11 +364,19 @@ def capture(args: argparse.Namespace) -> int:
     metadata["ok"] = not interrupted and "error" not in metadata
     meta_path.write_text(json.dumps(metadata, indent=2))
 
+    # Concise hwtel summary in the console output so the operator can spot
+    # thermal throttling at a glance without parsing the sidecar JSON.
+    hwtel_summary = metadata["hwtel"]["summary"]
+    thermal_summary = " ".join(
+        f"{zone}:{stats['min']:.0f}→{stats['max']:.0f}°C"
+        for zone, stats in hwtel_summary.get("thermal_C", {}).items()
+    )
     print(
         f"\n[capture] wrote {len(files_record)} .iq files + 1 .json sidecar to {out_dir}\n"
         f"  base={base}\n"
         f"  total_samples={total_samples}   duration={metadata['actual_duration_s']:.2f} s\n"
-        f"  writer queue-full blocks={queue_full_count[0]}",
+        f"  writer queue-full blocks={queue_full_count[0]}\n"
+        f"  hwtel thermal: {thermal_summary or '(no zones detected)'}",
         flush=True,
     )
     return 0 if metadata["ok"] else 1
@@ -373,6 +402,9 @@ def main() -> int:
     ap.add_argument("--out-dir", type=Path,
                     default=Path("bench/observation_mode_research/noise_captures"),
                     help="Output directory (default: bench/observation_mode_research/noise_captures)")
+    ap.add_argument("--hwtel-interval", type=float, default=1.0,
+                    help="Hardware telemetry sample interval in seconds (default 1.0; "
+                         "set to 0.5 for finer correlation with libusb-9 cliff timing)")
     args = ap.parse_args()
     return capture(args)
 
