@@ -288,6 +288,74 @@ in any new code; if you maintain code that uses the dict form, switch
 it on Debian 13 deployments. Reported by embedded-agent during the
 §3.5 soapy-fallback smoke on 2026-06-16.
 
+## Storage class for IQ captures
+
+**Policy (operator-confirmed 2026-06-17):** the OPI5's SD card
+(`/dev/mmcblk1p1`, Class 10 ext4) is for the OS and small writes only.
+Bulk IQ captures must NOT land on it. Sustained-write benchmarks at
+16 MSPS hit the SD card's sequential-write ceiling
+(~30 MB/s effective) well below libfobos's 128 MB/s sustained data
+rate, the writer queue fills, and the read pipeline blocks long enough
+to trigger the libusb-9 cliff at ~63 s wall-clock (despite the
+background-writer queue in `bench/observation_mode_research/capture_noise.py`
+that decouples the libfobos read from the disk syscall).
+
+| storage | sustained write | suitable for |
+|---|---|---|
+| SD card on OPI5 (Class 10 / mmcblk1) | ~30 MB/s | OS + small writes ONLY |
+| tmpfs (RAM-backed) | ≫1 GB/s | dev / one-shot capture sessions; size-limited by RAM |
+| eMMC | ~100–200 MB/s | situational — depends on board variant |
+| M.2 NVMe SSD over PCIe | ≫1 GB/s | production target |
+
+### Capture session recipes
+
+**Dev / research session** — mount tmpfs as the capture target, run the
+capture, rsync off before unmount:
+
+```bash
+sudo mkdir -p /mnt/capture-tmp
+sudo mount -t tmpfs -o size=4G tmpfs /mnt/capture-tmp
+# Run the capture pointing --out-dir at the tmpfs:
+uv run python bench/observation_mode_research/capture_noise.py \
+    --freq 868e6 --rate 16e6 --duration 60 \
+    --env quiet_lab --antenna "<descriptor>" \
+    --out-dir /mnt/capture-tmp
+# Rsync to a persistent destination:
+rsync -a /mnt/capture-tmp/ \
+    ~/watchtower-edge-pfobos/bench/observation_mode_research/noise_captures/
+sudo umount /mnt/capture-tmp
+```
+
+Plan tmpfs size for ~7.7 GB per band at 16 MSPS / 60 s. Multi-band
+sessions: rsync between bands, or scale tmpfs to the per-band budget.
+
+**Production / operational** — provision the edge image with an M.2
+NVMe SSD as the capture destination. The same `--out-dir` flag points
+at the NVMe mount; the script doesn't care about the underlying
+storage. Operator-confirmed direction; specific SSD model + mount
+point are deployment-stage choices.
+
+### Why the SD card can't be the bulk-capture target
+
+At 16 MSPS / complex64 the device sustains 128 MB/s. The OPI5's
+mmcblk1 SD card sustained-writes at ~30 MB/s on the
+`868MHz_16MSPS_quiet_lab_20260617T164623Z` validation run:
+
+```
+total_samples:           240,058,368  (1.92 GB)
+actual_duration_s:       62.91
+effective_rate:          30.5 MB/s    ← SD bandwidth ceiling
+queue_full_blocks:       202          ← writer fell behind 202×
+sample_completion_pct:   23.9%
+end_state:               Fobos error -9: libusb error
+```
+
+The writer-queue refactor still helped (5.8× duration improvement
+over the pre-fix 10.79 s cliff at the same rate) — the bottleneck just
+moved from "syscall stalls inner loop" to "disk capacity ceiling".
+Further script-level fixes are diminishing returns; the right path is
+faster underlying storage.
+
 ## See also
 
 - `setup/aarch64/Dockerfile.build-aarch64` — builder image that produces the artifact set referenced above
