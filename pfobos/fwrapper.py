@@ -301,13 +301,24 @@ class FobosSDR:
         self._python_callback = callback
         
         # Create a wrapper for the callback that checks the stop flag.
-        # Per libfobos contract (fobos.c, transfer-completion callback site):
-        #   complex_samples_count = transfer->actual_length / 4
-        #   dev->rx_cb(dev->rx_buff, complex_samples_count, ctx)
-        # So `buf_length` in this callback is IQ pair count (not float count).
-        # Buffer holds 2 floats per pair (interleaved I, Q) = 8 bytes per pair.
-        # Pre-0.4.1 used `buf_length * 4` which extracted only half the chunk —
-        # the async version of the byte-count bug fixed for sync in 0.4.0.
+        #
+        # NOTE on async buf_length semantics (verified empirically 2026-06-18):
+        # The libfobos source LITERALLY says `complex_samples_count = actual_length / 4`
+        # then passes that as the callback's `buf_length`, which would imply IQ pair
+        # count — matching the sync `*actual_buf_length` semantics fixed in 0.4.0.
+        # But empirically on hardware, reading `buf_length * 8` bytes (the
+        # IQ-pair-count interpretation) yields EXACTLY 2× the configured sample
+        # rate at every rate we tested (4 MSPS → 8 MSPS effective; 16 MSPS →
+        # 32 MSPS effective). That's physically impossible if the device honors
+        # set_samplerate, so the buffer must hold buf_length floats (= half-IQ
+        # pair count) for the async path despite what the source seems to imply.
+        # Possible explanations: (a) async path uses different transfer sizing
+        # than transfer_buf_size suggests; (b) the convert_samples size argument
+        # is interpreted differently in the async-completion path; (c) source has
+        # subtle bug that compensates internally. Either way, the empirically
+        # correct read is `buf_length * 4` bytes (= buf_length floats =
+        # buf_length/2 IQ pairs) — same as the pre-0.4.0 sync interpretation,
+        # which happens to match the actual async byte layout.
         @self.ffi.callback("void(float *, uint32_t, void *)")
         def _c_callback(buf, buf_length, ctx):
             try:
@@ -318,12 +329,14 @@ class FobosSDR:
                 if buf_length <= 0:
                     return
 
-                # Extract 2 floats per IQ pair = 8 bytes per pair.
+                # See NOTE above on async buf_length semantics. Reading
+                # buf_length * 4 bytes gives buf_length/2 complex samples,
+                # matching the device's actual delivery rate empirically.
                 buffer = np.frombuffer(
-                    self.ffi.buffer(buf, buf_length * 8), dtype=np.float32
+                    self.ffi.buffer(buf, buf_length * 4), dtype=np.float32
                 ).copy()
 
-                # Defensive: should always be even given the IQ-pair layout
+                # Make sure buffer length is even for complex conversion
                 if len(buffer) % 2 != 0:
                     buffer = buffer[:-1]
 
