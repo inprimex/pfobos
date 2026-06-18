@@ -364,12 +364,18 @@ int fobos_rx_read_async(fobos_dev_t *dev, fobos_rx_cb_t cb,
     if (!dev || !cb) return -2;
     if (buf_length == 0) buf_length = 32768;
 
+    /* Per real libfobos contract: buf_length is IQ pair count; the float*
+     * buffer the callback receives holds 2 floats per pair (interleaved
+     * I, Q) = 8 bytes per pair. Allocate buf_length * 2 floats and fill
+     * all of them. The callback's buf_length argument is IQ pair count
+     * (matches fobos.c transfer-completion: complex_samples_count =
+     * actual_length / 4). */
     g_async_cancel = 0;
-    float *buf = malloc(buf_length * sizeof(float));
+    float *buf = malloc(buf_length * 2 * sizeof(float));
     if (!buf) return -3;
 
     for (uint32_t i = 0; i < buf_count && !g_async_cancel; i++) {
-        fill_buffer(buf, buf_length);
+        fill_buffer(buf, buf_length * 2);
         cb(buf, buf_length, ctx);
     }
     free(buf);

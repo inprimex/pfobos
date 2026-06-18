@@ -6,6 +6,42 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/) — minor
 version bumps signal breaking-API changes pre-1.0.
 
+## [0.4.1] — 2026-06-18
+
+### Fixed
+
+- `FobosSDR.start_rx_async` callback wrapper had the same byte-count
+  bug that `read_rx_sync` had pre-0.4.0 — `self.ffi.buffer(buf,
+  buf_length * 4)` extracted only the first half of every chunk
+  libfobos delivered. Per libfobos source (fobos.c transfer-completion
+  callback site):
+
+      uint32_t complex_samples_count = transfer->actual_length / 4;
+      dev->rx_cb(dev->rx_buff, complex_samples_count, ctx);
+
+  `buf_length` in the callback is **IQ pair count** (each pair = 2
+  floats = 8 bytes in the user buffer). The wrapper now reads
+  `buf_length * 8` bytes to capture all 2N floats for N IQ pairs.
+
+  Surfaced when profiling the async path against sync after the 0.4.0
+  release on OPI5-1: sync delivers 99.8% of nominal sample rate with
+  edge container paused; async was delivering ~75% with the same
+  configuration. Half the gap was this bug; the rest is libfobos
+  async-specific overhead (USB submit_transfer + per-buffer queue
+  management) and is not a wrapper concern.
+
+### Profiling notes
+
+The 2026-06-17 "47% effective rate" finding that prompted the 0.4.0
+investigation included an apparent residual gap of ~12.5% after the
+0.4.0 fix landed. With the OPI5's watchtower-edge container paused
+(eliminating CPU/USB contention) the residual gap disappears: sync at
+default chunk size (`buf_length=32768`) delivers 99.8% effective rate.
+The 12.5% we measured during the bulk capture sessions was edge
+container contention manifesting as wrapper read jitter, not libfobos
+or wrapper overhead. Documented for the next architect who asks "should
+we rewrite the wrapper in Rust for speed".
+
 ## [0.4.0] — 2026-06-18
 
 ### Changed (BREAKING — behavior)
