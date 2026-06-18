@@ -130,6 +130,46 @@ bindings end-to-end. None of them block deployment; all of them
 are silent until they're not, so they live here rather than as a
 support ticket later.
 
+### USB port choice on OPI5 matters — not all USB 3.0 ports are equal
+
+Validated 2026-06-18 on OPI5-1: two of the OPI5 Max's USB 3.0 SuperSpeed
+ports (both nominally 5 Gbps) deliver materially different sustained
+throughput for the Fobos workload. Same SoC, same Fobos device, same
+`bench/profile_wrapper.py --mode async --rate 50e6 --duration 30`,
+edge container paused:
+
+| port | xhci controller | IRQ | sustained eff @ 50 MSPS |
+|---|---|---:|---:|
+| Bus 005 | xhci-hcd.12.auto | 87 | **24–28 MSPS (48–57%)** |
+| Bus 002 | xhci-hcd.11.auto | 86 | **~6.6 MSPS (13%)** |
+
+The 2-4× difference isn't a wrapper or libfobos issue — both ports
+enumerate as SuperSpeed at the link layer; the controllers differ in
+practical DMA / DRAM / fabric throughput. Possible causes (not pinned
+down):
+
+- One xhci controller shares DRAM bandwidth with PCIe / eMMC / NPU
+- Different DMA engine priorities at the SoC interconnect
+- Different USB phy quality between the two physical ports
+
+How to identify which port you're on:
+
+```bash
+# Find the bus the Fobos is on
+lsusb | grep -i fobos
+# → Bus 005 Device 003: ID 16d0:132e MCS Fobos SDR
+
+# Find which xhci controller serves that bus
+grep -i xhci /proc/interrupts
+# IRQ 87 named "xhci-hcd:usb3" pairs Bus 003 (USB 2.0) + Bus 005 (USB 3.0)
+# IRQ 86 named "xhci-hcd:usb1" pairs Bus 001 (USB 2.0) + Bus 002 (USB 3.0)
+```
+
+For OPI5 Max specifically, **prefer the USB 3.0 port served by
+xhci-hcd.12.auto (Bus 005)** for any SDR workload. The blue USB 3.0
+port physically further from the HDMI socket on the operator's unit
+was the faster one in our testing; verify on yours before committing.
+
 ### Device degrades on uncaught crash → `usbreset 16d0:132e` to recover
 
 When a process holding the Fobos exits uncleanly (uncaught Python
