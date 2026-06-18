@@ -6,6 +6,56 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/) — minor
 version bumps signal breaking-API changes pre-1.0.
 
+## [0.4.0] — 2026-06-18
+
+### Changed (BREAKING — behavior)
+
+- `FobosSDR.read_rx_sync` now returns the FULL number of complex samples
+  that libfobos delivered, not half. Pre-0.4.0 the wrapper extracted
+  `actual_len * 4` bytes from libfobos's float buffer when `actual_len`
+  is the IQ pair count delivered (per the libfobos source contract:
+  `*actual_buf_length = actual / 4` from `fobos.c`). Since the float
+  buffer holds 2 floats per IQ pair (= 8 bytes per pair), `actual_len * 4`
+  extracted only the first half of every chunk.
+
+  Concrete impact: sustained captures at 8 MSPS were delivering ~3.8 MSPS
+  effective into the returned ndarray (47% of nominal). Post-0.4.0 they
+  deliver the full nominal rate modulo libfobos's small overhead.
+
+  **Existing captured `.iq` files remain valid** — they contain the first
+  half of each chunk libfobos produced, in correct I/Q-interleaved order.
+  Downstream analysis on them is statistically valid; it just had fewer
+  samples available than the requested rate × duration would suggest.
+  Re-capturing the corpus with the fix doubles the sample count per
+  unit wall-clock.
+
+### Migration
+
+- Consumers of `FobosSDR.read_rx_sync` get ~2× the samples per call from
+  the same `start_rx_sync(buf_length)` configuration. No API change;
+  buffer sizes and the complex64 dtype are unchanged.
+- Unit tests that assert specific sample counts per `read_rx_sync` call
+  need expected-count values doubled.
+- `watchtower-edge` `FobosIQSource.read_chunk` inherits the doubled
+  sample count and should bump its `pfobos` pin from `^0.3.0` to
+  `^0.4.0`.
+
+### Why 0.4.0 (not 0.3.1)
+
+API surface is unchanged, but the wrapper's observable contract changes
+from "delivers ~half the IQ samples libfobos produced" to "delivers all
+IQ samples". Treated as breaking-behavior so consumers opt in via the
+minor-version bump rather than silently inherit via a patch upgrade.
+
+### Reference
+
+- libfobos source: rigexpert/libfobos master post-2.4.0,
+  `fobos/fobos.c::fobos_rx_read_sync` and `::fobos_rx_start_sync`
+- pfobos diagnostic that surfaced the bug: bus message
+  `20260618T085536` (47% effective rate, independent of edge container)
+- Contract-change notice to embedded-agent: bus message
+  `20260618T090654` (pre-PR heads-up per CLAUDE.md spec change rules)
+
 ## [0.3.0] — 2026-06-17
 
 ### Changed (BREAKING)
