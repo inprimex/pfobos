@@ -300,28 +300,33 @@ class FobosSDR:
         # The callback reference is kept to prevent garbage collection
         self._python_callback = callback
         
-        # Create a wrapper for the callback that checks the stop flag
+        # Create a wrapper for the callback that checks the stop flag.
+        # Per libfobos contract (fobos.c, transfer-completion callback site):
+        #   complex_samples_count = transfer->actual_length / 4
+        #   dev->rx_cb(dev->rx_buff, complex_samples_count, ctx)
+        # So `buf_length` in this callback is IQ pair count (not float count).
+        # Buffer holds 2 floats per pair (interleaved I, Q) = 8 bytes per pair.
+        # Pre-0.4.1 used `buf_length * 4` which extracted only half the chunk —
+        # the async version of the byte-count bug fixed for sync in 0.4.0.
         @self.ffi.callback("void(float *, uint32_t, void *)")
         def _c_callback(buf, buf_length, ctx):
             try:
                 # Check stop flag to prevent race conditions during shutdown
                 if hasattr(self, '_async_stop_flag') and self._async_stop_flag:
                     return
-                    
-                # Don't process if buffer is empty or invalid
+
                 if buf_length <= 0:
                     return
-                
-                # Copy C buffer into numpy array via memoryview (avoids Python loop)
+
+                # Extract 2 floats per IQ pair = 8 bytes per pair.
                 buffer = np.frombuffer(
-                    self.ffi.buffer(buf, buf_length * 4), dtype=np.float32
+                    self.ffi.buffer(buf, buf_length * 8), dtype=np.float32
                 ).copy()
 
-                # Make sure buffer length is even for complex conversion
+                # Defensive: should always be even given the IQ-pair layout
                 if len(buffer) % 2 != 0:
                     buffer = buffer[:-1]
 
-                # Reshape the buffer to complex IQ samples (I and Q are interleaved)
                 iq_samples = buffer[0::2] + 1j * buffer[1::2]
                 
                 # Call the Python callback with the samples
