@@ -485,26 +485,32 @@ class FobosSDR:
         ret = self.lib.fobos_rx_read_sync(self.dev, self._buffer_ptr, actual_len_ptr)
         self._check_error(ret)
 
+        # Per libfobos contract: *actual_buf_length is in complex IQ pair count.
+        # See rigexpert/libfobos fobos.c: `*actual_buf_length = actual / 4` where
+        # `actual` is the byte count of the int16-pair USB transfer (4 bytes per
+        # IQ pair). The float* buffer libfobos writes into holds 2 floats per
+        # IQ pair (interleaved I, Q) = 8 bytes per IQ pair.
         actual_len = actual_len_ptr[0]
 
         if actual_len == 0:
-            # No data received
             return np.array([], dtype=np.complex64)
 
-        if actual_len > self._buffer_length * 2:
-            # Sanity check — shouldn't happen if C library is behaving
-            actual_len = self._buffer_length * 2
+        if actual_len > self._buffer_length:
+            # libfobos shouldn't write more pairs than we requested.
+            actual_len = self._buffer_length
 
-        # Copy C buffer into numpy array via memoryview (avoids Python loop)
+        # Extract 2 floats per IQ pair = 8 bytes per pair. Pre-0.4.0 used
+        # actual_len * 4 which silently discarded the second half of every
+        # chunk libfobos delivered (the ~47% effective-rate bug). See
+        # CHANGELOG 0.4.0.
         buffer = np.frombuffer(
-            self.ffi.buffer(self._buffer_ptr, actual_len * 4), dtype=np.float32
+            self.ffi.buffer(self._buffer_ptr, actual_len * 8), dtype=np.float32
         ).copy()
 
-        # Make sure length is even for complex conversion
+        # Defensive: should always be even given the IQ-pair layout
         if len(buffer) % 2 != 0:
             buffer = buffer[:-1]
 
-        # Create complex array from interleaved I/Q data
         return buffer[0::2] + 1j * buffer[1::2]
 
     def stop_rx_sync(self):

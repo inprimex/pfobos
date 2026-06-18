@@ -142,7 +142,8 @@ class TestStubLifecycle(unittest.TestCase):
 @unittest.skipUnless(STUB_AVAILABLE, SKIP_MSG)
 class TestStubSyncReception(unittest.TestCase):
 
-    BUF = 4096   # float values → 2048 IQ pairs
+    BUF = 4096   # IQ pair count per libfobos `fobos_rx_start_sync` contract;
+                 # each pair → one complex64 sample in the returned ndarray.
 
     def setUp(self):
         self.sdr = make_sdr()
@@ -163,10 +164,10 @@ class TestStubSyncReception(unittest.TestCase):
         self.assertEqual(iq.dtype, np.complex64)
 
     def test_iq_length(self):
-        """IQ array has BUF/2 samples (interleaved I+Q → complex)."""
+        """IQ array has BUF complex samples (post-pfobos-0.4.0 fix)."""
         self.sdr.start_rx_sync(self.BUF)
         iq = self.sdr.read_rx_sync()
-        self.assertEqual(len(iq), self.BUF // 2)
+        self.assertEqual(len(iq), self.BUF)
 
     def test_iq_not_zero(self):
         """Stub generates non-zero IQ data."""
@@ -185,7 +186,7 @@ class TestStubSyncReception(unittest.TestCase):
         self.sdr.start_rx_sync(self.BUF)
         for _ in range(3):
             iq = self.sdr.read_rx_sync()
-            self.assertEqual(len(iq), self.BUF // 2)
+            self.assertEqual(len(iq), self.BUF)
             self.assertTrue(np.iscomplexobj(iq))
 
     def test_stop_clears_sync_mode(self):

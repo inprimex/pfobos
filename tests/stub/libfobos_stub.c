@@ -414,7 +414,10 @@ int fobos_rx_start_sync(fobos_dev_t *dev, uint32_t buf_length) {
 
 int fobos_rx_read_sync(fobos_dev_t *dev, float *buf, uint32_t *actual_buf_length) {
     if (!dev || !dev->sync_started) return -7; /* SYNC_NOT_STARTED */
-    fill_buffer(buf, dev->buf_length);
+    /* Per real libfobos contract: buf_length is IQ pair count; the float*
+     * buffer holds 2 floats per pair (interleaved I, Q). Write
+     * dev->buf_length * 2 floats and report dev->buf_length pairs. */
+    fill_buffer(buf, dev->buf_length * 2);
     if (actual_buf_length) *actual_buf_length = dev->buf_length;
     return 0;
 }
