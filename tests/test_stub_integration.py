@@ -203,7 +203,10 @@ class TestStubSyncReception(unittest.TestCase):
 @unittest.skipUnless(STUB_AVAILABLE, SKIP_MSG)
 class TestStubAsyncReception(unittest.TestCase):
 
-    BUF_LEN   = 4096   # IQ pair count per libfobos `fobos_rx_read_async` contract
+    BUF_LEN   = 4096   # Async path is empirically a float-count argument (despite the
+                       # libfobos source suggesting IQ pair count). See the NOTE in
+                       # FobosSDR.start_rx_async for the reasoning; callback yields
+                       # BUF_LEN/2 complex samples per invocation.
     BUF_COUNT = 4      # fwrapper enforces minimum buf_count=4
 
     def test_callback_called_correct_times(self):
@@ -236,7 +239,7 @@ class TestStubAsyncReception(unittest.TestCase):
 
         for iq in received:
             self.assertEqual(iq.dtype, np.complex64)
-            self.assertEqual(len(iq), self.BUF_LEN)
+            self.assertEqual(len(iq), self.BUF_LEN // 2)
             self.assertTrue(np.iscomplexobj(iq))
 
     def test_async_iq_not_zero(self):

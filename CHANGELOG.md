@@ -6,9 +6,33 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/) — minor
 version bumps signal breaking-API changes pre-1.0.
 
-## [0.4.1] — 2026-06-18
+## [0.4.2] — 2026-06-18
 
-### Fixed
+### Reverted
+
+- Reverted the async byte-count change from 0.4.1. Empirical hardware
+  testing on OPI5-1 (2026-06-18) showed that interpreting the async
+  callback's `buf_length` as IQ pair count (matching the sync path
+  and matching what the libfobos source LITERALLY says) yields
+  EXACTLY 2× the configured sample rate — physically impossible if
+  the device honors `set_samplerate`. Tested at 4 MSPS (got 8 MSPS
+  async), 8 MSPS (got 16 MSPS), 16 MSPS (got 32 MSPS). Sync at all
+  rates delivered 99.4–99.8% of nominal.
+
+  The async path's empirical semantics are still "buf_length is
+  effectively float count" — same as pre-0.4.0 sync interpretation,
+  but mysteriously correct for async. A wrapper NOTE in
+  `start_rx_async` documents the disagreement between source and
+  hardware behavior for the next investigator.
+
+  Net effect: 0.4.2 keeps the sync fix from 0.4.0 (read_rx_sync
+  returns full samples) and reverts the async change from 0.4.1
+  (start_rx_async callback returns the pre-0.4.0 sample count). No
+  effect on consumers of either path that were on 0.3.x or earlier.
+
+## [0.4.1] — 2026-06-18 (yanked)
+
+### Fixed (subsequently reverted in 0.4.2)
 
 - `FobosSDR.start_rx_async` callback wrapper had the same byte-count
   bug that `read_rx_sync` had pre-0.4.0 — `self.ffi.buffer(buf,
