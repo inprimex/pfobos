@@ -138,10 +138,10 @@ throughput for the Fobos workload. Same SoC, same Fobos device, same
 `bench/profile_wrapper.py --mode async --rate 50e6 --duration 30`,
 edge container paused:
 
-| port | xhci controller | IRQ | sustained eff @ 50 MSPS |
-|---|---|---:|---:|
-| Bus 005 | xhci-hcd.12.auto | 87 | **24–28 MSPS (48–57%)** |
-| Bus 002 | xhci-hcd.11.auto | 86 | **~6.6 MSPS (13%)** |
+| xhci controller | IRQ | bus# (at measurement time) | sustained eff @ 50 MSPS |
+|---|---:|---:|---:|
+| **xhci-hcd.12.auto** (fast) | **87** | Bus 005 (initial) / Bus 004 (post-reboot) | **24–28 MSPS (48–57%)** |
+| xhci-hcd.11.auto (slow) | 86 | Bus 002 | ~6.6 MSPS (13%) |
 
 The 2-4× difference isn't a wrapper or libfobos issue — both ports
 enumerate as SuperSpeed at the link layer; the controllers differ in
@@ -152,23 +152,41 @@ down):
 - Different DMA engine priorities at the SoC interconnect
 - Different USB phy quality between the two physical ports
 
-How to identify which port you're on:
+**Bus numbers can rotate across reboots.** Confirmed 2026-06-19:
+after a power-cycle the Fobos moved from Bus 005 to Bus 004 without
+the cable being touched — kernel re-enumerated the xhci controllers
+in a different order. The PHYSICAL port and CONTROLLER didn't change;
+only the bus number label. **Identify by xhci controller IRQ name,
+not by bus number**, when validating which port a device is on.
+
+How to identify which xhci controller a device is on (robust across
+reboots):
 
 ```bash
 # Find the bus the Fobos is on
 lsusb | grep -i fobos
-# → Bus 005 Device 003: ID 16d0:132e MCS Fobos SDR
+# → Bus 004 Device 002: ID 16d0:132e MCS Fobos SDR (this run)
+# → may be Bus 005 or another after next reboot — bus number is not stable
 
-# Find which xhci controller serves that bus
+# Look up which xhci controller serves that bus via /proc/interrupts.
+# The "xhci-hcd:usbN" name in the IRQ description is the controller's
+# USB 2.0 root-hub name, and is STABLE across reboots — the controller
+# always advertises the same pair of {USB 2.0 hub, USB 3.0 hub}.
 grep -i xhci /proc/interrupts
-# IRQ 87 named "xhci-hcd:usb3" pairs Bus 003 (USB 2.0) + Bus 005 (USB 3.0)
-# IRQ 86 named "xhci-hcd:usb1" pairs Bus 001 (USB 2.0) + Bus 002 (USB 3.0)
+#  86: ... GICv3 252 Level  xhci-hcd:usb1   ← slower controller
+#  87: ... GICv3 253 Level  xhci-hcd:usb3   ← faster controller (where Fobos should be)
 ```
 
 For OPI5 Max specifically, **prefer the USB 3.0 port served by
-xhci-hcd.12.auto (Bus 005)** for any SDR workload. The blue USB 3.0
-port physically further from the HDMI socket on the operator's unit
-was the faster one in our testing; verify on yours before committing.
+`xhci-hcd:usb3` (IRQ 87, kernel name xhci-hcd.12.auto)** for any SDR
+workload. The blue USB 3.0 port physically further from the HDMI
+socket on the operator's unit was the faster one in our testing;
+verify on yours before committing.
+
+If the Fobos lands on the wrong controller after a reboot (lsusb
+shows it on the bus paired with IRQ 86 = xhci-hcd:usb1), unplug-and-
+replug into the OTHER physical USB 3.0 port. Bus number may differ
+again; the IRQ-name check is the source of truth.
 
 ### Device degrades on uncaught crash → `usbreset 16d0:132e` to recover
 
