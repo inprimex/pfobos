@@ -689,10 +689,89 @@ that heat, we're nowhere near the throttle threshold.
 | **watchtower-edge container contention** | ✓ **CONFIRMED CAUSE** | docker pause → no cliff at 30 s |
 | Effective rate ~50% of nominal | OPEN (second-order, not cliff-related) | 47–49% ratio with both edge running and paused |
 
+## CaptureSession library API (Phase 3 §5.1 corpus capture)
+
+`bench/observation_mode_research/capture_noise.py` exposes a library-first
+API as of the 2026-06-26 refactor. Embedded callers (edge runtime
+detection-metric writers, K-calibration harnesses, anything that needs
+both the IQ stream AND a parallel side-effect) should use the API
+directly instead of shelling out to the CLI.
+
+### Quick usage
+
+```python
+from pathlib import Path
+from bench.observation_mode_research.capture_noise import (
+    CaptureConfig, CaptureChunk, run_capture,
+)
+
+def metric_writer(chunk: CaptureChunk) -> None:
+    rms = float(np.abs(chunk.samples).mean())
+    metrics_jsonl.write(f'{{"file_idx": {chunk.file_idx}, "rms": {rms}}}\n')
+
+config = CaptureConfig(
+    freq_hz=2.4e9,
+    rate_hz=16e6,
+    duration_s=30.0,
+    env="field",
+    antenna="2.4 GHz dipole",
+    out_dir=Path("/mnt/nvme/corpus/run-001"),
+    fan_out=[metric_writer],
+)
+result = run_capture(config)
+assert result.ok, result.metadata.get("error")
+```
+
+### fan_out hook contract
+
+- Each consumer is `Callable[[CaptureChunk], None]`
+- Invoked in the **writer thread**, immediately AFTER the .iq file lands on disk
+- Receives the same chunks in the same order as the .iq filenames
+- Exceptions are caught, logged in `metadata['fan_out']['errors']`, and do not break the IQ-write path
+- Consumer names are recorded in `metadata['fan_out']['consumers']` for the sidecar audit trail
+- Heavy work in the consumer is fine — it's already off the read path. But be aware that a slow consumer increases writer-thread latency and can backpressure the bounded queue (`queue_max_chunks`, default 64)
+
+### CaptureChunk fields
+
+| field | type | meaning |
+|---|---|---|
+| `file_idx` | int | 1-based file index matching the `_partNNNN.iq` filename |
+| `samples` | `np.ndarray[complex64]` | The chunk that was just written (default 500 000 IQ pairs) |
+| `path` | `Path` | The .iq file that was just written (in case a consumer wants to re-open it via downstream tooling) |
+| `band_label` | str | E.g. `2.4GHz`, `868MHz` |
+| `base` | str | Filename base: `<band>_<rate>MSPS_<env>_<utc>` |
+
+### CaptureResult fields
+
+| field | meaning |
+|---|---|
+| `ok` | True iff the session completed without errors and was not interrupted |
+| `metadata` | Full `pfobos-noise-capture/2` sidecar dict (also written to `metadata_path`) |
+| `metadata_path` | Path to the `.json` sidecar |
+| `iq_paths` | List of all `.iq` files written, in order |
+| `total_samples` | Total IQ samples consumed from the SDR |
+| `actual_duration_s` | Wall-clock duration of the read loop |
+| `error` | Writer-thread exception if it died, else None |
+
+### Storage target
+
+Always set `out_dir` on the NVMe mount, e.g. `/mnt/nvme/corpus/<run-tag>/`.
+- SD card writes (~30 MB/s sustained) are well below the 128 MB/s budget for 16 MSPS captures and will trip the libusb-9 cliff via queue backpressure.
+- Apacer AS2280P4-1 256 GB at .136 was validated 2026-06-25 at 830 MB/s sequential — 60–90 s captures fit comfortably.
+
+### Operational checklist before sustained captures
+
+1. `docker pause watchtower-edge-edge-1` — eliminates edge-container contention (the confirmed root cause of the libusb-9 cliff at 8+ MSPS sustained)
+2. Verify the Fobos is on the IRQ 87 USB port (`xhci-hcd:usb3`); see "USB port choice on OPI5 matters" above
+3. For multi-phase sessions in the same process: ensure `sdr.get_board_info()` is called between `open()` and `set_samplerate()` (libfobos quirk); CaptureSession does this for you automatically
+4. Confirm `out_dir` resolves under NVMe; never under `/`, `/home`, or any SD-backed path
+
 ## See also
 
 - `setup/aarch64/Dockerfile.build-aarch64` — builder image that produces the artifact set referenced above
 - `setup/aarch64/build-docker.sh` — script that runs the build and exports `lib/`, `include/`, `udev/`, `VERSIONS`
 - `pfobos/fwrapper.py::FobosSDR._load_library` — the discovery code itself
+- `bench/observation_mode_research/capture_noise.py` — CaptureSession library API source
+- `tests/test_capture_session.py` — fan_out hook contract tests (stub-backed, hardware-free)
 - OpenSpec change `pfobos-as-primary-sdr-backend` (in `watchtower-specs`) — §4.2 of `tasks.md` is this document
 - Findings memo `bench/observation_mode_research/findings/findings-2026-06-16-session-1.md` — full context for the runtime gotchas above
