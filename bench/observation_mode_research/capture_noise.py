@@ -1,6 +1,6 @@
 """
-observation-mode-fast-scan-detection-research E1.2 task 4.6 —
-quiet-spectrum capture for embedded-agent's PFA-calibration corpus.
+observation-mode-fast-scan-detection-research E1.2 task 4.6 + Phase 3 §5.1 —
+quiet-spectrum + drone-linked corpus capture.
 
 Captures `--duration` seconds of raw IQ at the device's native rate, splits
 into 500k-IQ-sample files (per embedded-agent's bus 20260611T121717 spec),
@@ -13,10 +13,48 @@ Schema produced: `pfobos-noise-capture/2`. Consumer-side parser:
 RMS p50 = 0.0005 from the 22 s 868 MHz quiet-lab capture, consistent with
 the LNA=1/VGA=8 noise floor.
 
-Schema bump 1→2: added `hwtel` block carrying thermal-zone + CPU-freq +
-load-average time series sampled at `--hwtel-interval` seconds throughout
-the capture. Lets consumers correlate libusb-9 cliff timing with
-thermal throttling / CPU contention on passively-cooled OPI5 deployments.
+## Library API (since the 2026-06-26 refactor)
+
+The capture engine is now library-first. Embed it in your own pipelines
+via `CaptureConfig` + `CaptureSession.run()` (or the convenience
+`run_capture(config)` function). The CLI in `main()` is a thin shim that
+builds a `CaptureConfig` from argparse and invokes the session.
+
+```python
+from bench.observation_mode_research.capture_noise import (
+    CaptureConfig, run_capture,
+)
+
+def my_metric_writer(chunk):
+    # Called synchronously in the writer thread AFTER the .iq write.
+    # Exceptions are caught + recorded in metadata['fan_out']['errors'].
+    rms = float(np.abs(chunk.samples).mean())
+    metrics_jsonl.write(json.dumps({"file_idx": chunk.file_idx, "rms": rms}) + "\\n")
+
+config = CaptureConfig(
+    freq_hz=2.4e9, rate_hz=16e6, duration_s=30.0,
+    env="field", antenna="2.4 GHz dipole",
+    out_dir=Path("/mnt/nvme/corpus/run-001"),
+    fan_out=[my_metric_writer],
+)
+result = run_capture(config)
+print(result.ok, result.total_samples, result.metadata_path)
+```
+
+## fan_out hook contract
+
+Each fan_out consumer is a `Callable[[CaptureChunk], None]` invoked in the
+writer thread immediately AFTER the .iq file lands on disk. The writer
+loop catches and logs any exception so a misbehaving consumer cannot
+break the primary IQ-write path. Consumers see the same chunk objects in
+the same order as the .iq files were written.
+
+`CaptureChunk` fields:
+  - `file_idx`: 1-based file index matching the `_partNNNN.iq` filename
+  - `samples`: `numpy.ndarray[complex64]` — the chunk that was just written
+  - `path`: `Path` — the .iq file that was just written
+  - `band_label`: e.g. `2.4GHz`, `868MHz`
+  - `base`: filename base (band_rate_env_utc)
 
 ## Background writer architecture (since 2026-06-17 refactor)
 
@@ -41,6 +79,18 @@ it ever fills (data-loss diagnostic).
 
 Metadata `files[]` accumulates on the WRITER side and is merged into the
 main metadata dict at shutdown, so there's no shared-state race.
+
+## Operational notes for sustained captures on OPI5
+
+  - `docker pause watchtower-edge-edge-1` BEFORE invoking — edge container
+    contention causes the libusb-9 cliff at 8+ MSPS sustained.
+  - Use the IRQ 87 USB port (`xhci-hcd:usb3`); bus number rotates across
+    reboots, IRQ name is stable. 2-4× sustained-throughput delta vs.
+    the other USB 3.0 port.
+  - For multi-phase sessions in the same process, call
+    `sdr.get_board_info()` between `open()` and `set_samplerate()` to
+    clear residual device state (libfobos quirk).
+  - Target `out_dir` on NVMe (e.g. `/mnt/nvme/corpus/`), never SD card.
 
 ## Run
 
@@ -69,8 +119,10 @@ import signal
 import sys
 import threading
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 
@@ -93,6 +145,66 @@ SYNC_BUF_FLOATS = 65536
 QUEUE_MAX_CHUNKS = 64
 
 
+@dataclass
+class CaptureChunk:
+    """A single 500k-IQ-sample chunk that was just written to disk.
+
+    Passed to each fan_out consumer in the writer thread, after the .iq
+    file lands. Consumers can read `samples` for in-memory analysis or
+    re-open `path` for downstream tools that expect a file.
+    """
+    file_idx: int
+    samples: np.ndarray
+    path: Path
+    band_label: str
+    base: str
+
+
+FanOutConsumer = Callable[[CaptureChunk], None]
+
+
+@dataclass
+class CaptureConfig:
+    """Configuration for a single capture session.
+
+    Required: freq_hz, rate_hz, duration_s, env, antenna, out_dir.
+    The rest carry defaults that match the embedded-agent corpus spec.
+    """
+    freq_hz: float
+    rate_hz: float
+    duration_s: float
+    env: str  # "urban" | "field" | "quiet_lab"
+    antenna: str
+    out_dir: Path
+
+    lna_gain: int = 1
+    vga_gain: int = 8
+    hwtel_interval_s: float = 1.0
+
+    samples_per_file: int = SAMPLES_PER_CHUNK_FILE
+    sync_buf_floats: int = SYNC_BUF_FLOATS
+    queue_max_chunks: int = QUEUE_MAX_CHUNKS
+
+    fan_out: list[FanOutConsumer] = field(default_factory=list)
+
+    # Optional lib_path override — primarily for tests using the stub
+    # libfobos.so. Production callers leave this None and let pfobos's
+    # system library discovery find the real libfobos.so.
+    lib_path: str | None = None
+
+
+@dataclass
+class CaptureResult:
+    """Outcome of a CaptureSession.run() call."""
+    ok: bool
+    metadata: dict
+    metadata_path: Path
+    iq_paths: list[Path]
+    total_samples: int
+    actual_duration_s: float
+    error: Exception | None = None
+
+
 def _now_utc_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -111,7 +223,10 @@ def _writer_loop(
     q: queue.Queue,
     out_dir: Path,
     base: str,
+    band_label: str,
     files_record: list[dict],
+    fan_out_consumers: list[FanOutConsumer],
+    fan_out_errors: list[dict],
     writer_error: list[Exception | None],
     writer_died: threading.Event,
 ) -> None:
@@ -121,6 +236,10 @@ def _writer_loop(
     filesystem syscalls. Exits on the _POISON sentinel or on the first
     write error (records the exception so the main thread can surface
     it in the metadata and abort cleanly).
+
+    After each successful .iq write, invokes every fan_out consumer in
+    order. Consumer exceptions are caught + appended to `fan_out_errors`
+    so a buggy consumer cannot break the IQ-write path.
     """
     try:
         while True:
@@ -136,250 +255,330 @@ def _writer_loop(
                 "samples": int(chunk.size),
                 "bytes": int(chunk.size * 8),
             })
+            if fan_out_consumers:
+                capture_chunk = CaptureChunk(
+                    file_idx=file_idx,
+                    samples=chunk,
+                    path=part_path,
+                    band_label=band_label,
+                    base=base,
+                )
+                for consumer in fan_out_consumers:
+                    try:
+                        consumer(capture_chunk)
+                    except Exception as e:  # noqa: BLE001 — fan_out isolation is the point
+                        fan_out_errors.append({
+                            "file_idx": file_idx,
+                            "consumer": getattr(consumer, "__name__", repr(consumer)),
+                            "error": f"{type(e).__name__}: {e}",
+                        })
             q.task_done()
     except Exception as e:
         writer_error[0] = e
         writer_died.set()
 
 
-def capture(args: argparse.Namespace) -> int:
-    out_dir = args.out_dir
-    out_dir.mkdir(parents=True, exist_ok=True)
+class CaptureSession:
+    """One-shot capture session: open SDR → stream → close.
 
-    utc_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    base = f"{_band_label(args.freq)}_{args.rate/1e6:g}MSPS_{args.env}_{utc_stamp}"
-    meta_path = out_dir / f"{base}.json"
+    Usage:
 
-    sdr = FobosSDR()
-    sdr.open(0)
+        session = CaptureSession(config)
+        result = session.run()
 
-    board = sdr.get_board_info()
-    api = sdr.get_api_info()
-    advertised_rates = [float(r) for r in sdr.get_samplerates()]
-    if int(args.rate) not in [int(r) for r in advertised_rates]:
-        print(
-            f"WARNING: requested rate {args.rate} Hz not in advertised list "
-            f"{advertised_rates}. Continuing — Fobos will negotiate the closest "
-            f"supported rate.",
-            file=sys.stderr,
+    Or use the convenience function `run_capture(config)`.
+
+    Not re-entrant: construct a new instance per capture.
+    """
+
+    def __init__(self, config: CaptureConfig):
+        self.config = config
+
+    def run(self) -> CaptureResult:
+        cfg = self.config
+        out_dir = cfg.out_dir
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        utc_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        band_label = _band_label(cfg.freq_hz)
+        base = f"{band_label}_{cfg.rate_hz/1e6:g}MSPS_{cfg.env}_{utc_stamp}"
+        meta_path = out_dir / f"{base}.json"
+
+        sdr = FobosSDR(lib_path=cfg.lib_path) if cfg.lib_path else FobosSDR()
+        sdr.open(0)
+
+        board = sdr.get_board_info()
+        api = sdr.get_api_info()
+        advertised_rates = [float(r) for r in sdr.get_samplerates()]
+        if int(cfg.rate_hz) not in [int(r) for r in advertised_rates]:
+            print(
+                f"WARNING: requested rate {cfg.rate_hz} Hz not in advertised list "
+                f"{advertised_rates}. Continuing — Fobos will negotiate the closest "
+                f"supported rate.",
+                file=sys.stderr,
+            )
+
+        actual_rate = sdr.set_samplerate(cfg.rate_hz)
+        actual_freq = sdr.set_frequency(cfg.freq_hz)
+        sdr.set_lna_gain(cfg.lna_gain)
+        sdr.set_vga_gain(cfg.vga_gain)
+
+        hwtel = HwTelemetry(interval_s=cfg.hwtel_interval_s)
+        metadata = {
+            "schema": "pfobos-noise-capture/2",
+            "base": base,
+            "started_utc": _now_utc_iso(),
+            "host": os.uname().nodename,
+            "kernel": os.uname().release,
+            "fobos": {
+                **board,
+                "api": api,
+                "advertised_samplerates_hz": advertised_rates,
+            },
+            "config": {
+                "requested_center_freq_hz": cfg.freq_hz,
+                "actual_center_freq_hz": float(actual_freq),
+                "requested_sample_rate_hz": cfg.rate_hz,
+                "actual_sample_rate_hz": float(actual_rate),
+                "lna_gain": cfg.lna_gain,
+                "vga_gain": cfg.vga_gain,
+                "antenna": cfg.antenna,
+                "environment_tag": cfg.env,
+                "requested_duration_s": cfg.duration_s,
+            },
+            "hwtel": {
+                "interval_s": cfg.hwtel_interval_s,
+                "zones": hwtel.zones,
+                "cpus": hwtel.cpus,
+                "samples": [],
+                "summary": {},
+            },
+            "files": [],
+            "samples_per_file": cfg.samples_per_file,
+            "dtype": "complex64",
+            "byte_order": sys.byteorder,
+            "finished_utc": None,
+            "actual_duration_s": None,
+            "total_samples": 0,
+            "writer": {
+                "queue_max_chunks": cfg.queue_max_chunks,
+                "queue_full_blocks": 0,
+            },
+            "fan_out": {
+                "consumers": [
+                    getattr(c, "__name__", repr(c)) for c in cfg.fan_out
+                ],
+                "errors": [],
+            },
+            "ok": False,
+        }
+
+        # Write metadata stub up-front so even a hard-aborted capture leaves
+        # a parseable JSON sidecar that embedded-agent can inspect.
+        meta_path.write_text(json.dumps(metadata, indent=2))
+
+        chunk_queue: queue.Queue = queue.Queue(maxsize=cfg.queue_max_chunks)
+        files_record: list[dict] = []
+        fan_out_errors: list[dict] = []
+        queue_full_count = [0]
+        writer_error: list[Exception | None] = [None]
+        writer_died = threading.Event()
+        writer = threading.Thread(
+            target=_writer_loop,
+            args=(
+                chunk_queue, out_dir, base, band_label,
+                files_record, list(cfg.fan_out), fan_out_errors,
+                writer_error, writer_died,
+            ),
+            name="capture-writer",
+            daemon=False,
         )
+        writer.start()
 
-    actual_rate = sdr.set_samplerate(args.rate)
-    actual_freq = sdr.set_frequency(args.freq)
-    sdr.set_lna_gain(args.lna_gain)
-    sdr.set_vga_gain(args.vga_gain)
+        sdr.start_rx_sync(cfg.sync_buf_floats)
+        hwtel.start()
+        interrupted = False
 
-    # Hardware telemetry sampler — thermal zones + CPU freq + load.
-    # Captures the environment the IQ was recorded in so we can correlate
-    # libusb-9 cliff timing with thermal throttling / CPU contention.
-    hwtel = HwTelemetry(interval_s=args.hwtel_interval)
-    metadata = {
-        "schema": "pfobos-noise-capture/2",
-        "base": base,
-        "started_utc": _now_utc_iso(),
-        "host": os.uname().nodename,
-        "kernel": os.uname().release,
-        "fobos": {
-            **board,
-            "api": api,
-            "advertised_samplerates_hz": advertised_rates,
-        },
-        "config": {
-            "requested_center_freq_hz": args.freq,
-            "actual_center_freq_hz": float(actual_freq),
-            "requested_sample_rate_hz": args.rate,
-            "actual_sample_rate_hz": float(actual_rate),
-            "lna_gain": args.lna_gain,
-            "vga_gain": args.vga_gain,
-            "antenna": args.antenna,
-            "environment_tag": args.env,
-            "requested_duration_s": args.duration,
-        },
-        "hwtel": {
-            "interval_s": args.hwtel_interval,
-            "zones": hwtel.zones,
-            "cpus": hwtel.cpus,
-            "samples": [],
-            "summary": {},
-        },
-        "files": [],
-        "samples_per_file": SAMPLES_PER_CHUNK_FILE,
-        "dtype": "complex64",
-        "byte_order": sys.byteorder,
-        "finished_utc": None,
-        "actual_duration_s": None,
-        "total_samples": 0,
-        "writer": {
-            "queue_max_chunks": QUEUE_MAX_CHUNKS,
-            "queue_full_blocks": 0,
-        },
-        "ok": False,
-    }
+        def _on_signal(signum, _frame):
+            nonlocal interrupted
+            interrupted = True
+            print(f"\n[capture] caught signal {signum}; flushing current chunk file...",
+                  file=sys.stderr, flush=True)
 
-    # Write metadata stub up-front so even a hard-aborted capture leaves
-    # a parseable JSON sidecar that embedded-agent can inspect.
-    meta_path.write_text(json.dumps(metadata, indent=2))
+        # Signal handlers only install if we're on the main thread —
+        # library users embedding CaptureSession in a worker thread will
+        # raise ValueError from signal.signal(). Skip silently in that case;
+        # they're responsible for their own shutdown signalling.
+        installed_handlers = False
+        try:
+            signal.signal(signal.SIGINT, _on_signal)
+            signal.signal(signal.SIGTERM, _on_signal)
+            installed_handlers = True
+        except ValueError:
+            pass
 
-    # Writer-thread setup: bounded queue + side-channel for the files list
-    # (avoids cross-thread mutation of metadata). writer_died fires if the
-    # writer hits an exception (e.g. disk full); main thread checks it
-    # before every put so we don't block forever on a dead consumer.
-    chunk_queue: queue.Queue = queue.Queue(maxsize=QUEUE_MAX_CHUNKS)
-    files_record: list[dict] = []
-    queue_full_count = [0]
-    writer_error: list[Exception | None] = [None]
-    writer_died = threading.Event()
-    writer = threading.Thread(
-        target=_writer_loop,
-        args=(chunk_queue, out_dir, base, files_record, writer_error, writer_died),
-        name="capture-writer",
-        daemon=False,
-    )
-    writer.start()
+        deadline = time.monotonic() + cfg.duration_s
+        file_idx = 0
+        accum: list[np.ndarray] = []
+        accum_samples = 0
+        total_samples = 0
+        t_start = time.monotonic()
 
-    sdr.start_rx_sync(SYNC_BUF_FLOATS)
-    hwtel.start()
-    interrupted = False
-
-    def _on_signal(signum, _frame):
-        nonlocal interrupted
-        interrupted = True
-        print(f"\n[capture] caught signal {signum}; flushing current chunk file...",
-              file=sys.stderr, flush=True)
-
-    signal.signal(signal.SIGINT, _on_signal)
-    signal.signal(signal.SIGTERM, _on_signal)
-
-    deadline = time.monotonic() + args.duration
-    file_idx = 0
-    accum: list[np.ndarray] = []
-    accum_samples = 0
-    total_samples = 0
-    t_start = time.monotonic()
-
-    try:
-        while not interrupted and time.monotonic() < deadline:
-            try:
-                iq = sdr.read_rx_sync()
-            except FobosException as e:
-                # pfobos 0.3.0 contract: sync mode survives errors. We
-                # still abort the capture session on first error because
-                # noise-capture cares about contiguous integrity per
-                # segment, not best-effort retry — embedded-agent's
-                # ingest is gap-tolerant via the sidecar files[] array,
-                # so a clean abort + new run is cleaner than an in-band
-                # gap that the JSON can't describe.
-                print(f"[capture] read error: {e.message}; aborting", file=sys.stderr)
-                metadata["error"] = {"code": e.code, "message": e.message}
-                break
-            accum.append(iq)
-            accum_samples += iq.size
-            total_samples += iq.size
-
-            while accum_samples >= SAMPLES_PER_CHUNK_FILE:
-                if writer_died.is_set():
-                    print(
-                        f"[capture] writer thread died: {writer_error[0]}; aborting",
-                        file=sys.stderr,
-                    )
-                    metadata["error"] = {
-                        "code": 0,
-                        "message": f"writer thread died: {writer_error[0]}",
-                    }
-                    interrupted = True
-                    break
-                stitched = np.concatenate(accum) if len(accum) > 1 else accum[0]
-                file_idx += 1
-                chunk = stitched[:SAMPLES_PER_CHUNK_FILE].copy()
-                remainder = stitched[SAMPLES_PER_CHUNK_FILE:]
-                # Non-blocking put first so we can detect queue-full
-                # situations as a diagnostic signal (writer can't keep
-                # up with the read pipeline — re-introduces the original
-                # failure mode if it persists).
+        try:
+            while not interrupted and time.monotonic() < deadline:
                 try:
-                    chunk_queue.put_nowait((file_idx, chunk))
-                except queue.Full:
-                    queue_full_count[0] += 1
-                    print(
-                        f"[capture] WARNING: writer queue full ({QUEUE_MAX_CHUNKS} "
-                        f"chunks pending); blocking read until disk catches up. "
-                        f"This may stress the USB pipeline.",
-                        file=sys.stderr, flush=True,
-                    )
-                    chunk_queue.put((file_idx, chunk))
-                if remainder.size:
-                    accum = [remainder.copy()]
-                    accum_samples = int(remainder.size)
-                else:
-                    accum = []
-                    accum_samples = 0
-    finally:
-        # Stop the SDR before the writer drains so the device session is
-        # released even if the writer takes a while on the trailing
-        # chunks.
-        try:
-            sdr.stop_rx_sync()
-        except Exception:
-            pass
-        try:
-            sdr.close()
-        except Exception:
-            pass
+                    iq = sdr.read_rx_sync()
+                except FobosException as e:
+                    # pfobos 0.3.0+ contract: sync mode survives errors. We
+                    # still abort the capture session on first error because
+                    # noise-capture cares about contiguous integrity per
+                    # segment, not best-effort retry — embedded-agent's
+                    # ingest is gap-tolerant via the sidecar files[] array,
+                    # so a clean abort + new run is cleaner than an in-band
+                    # gap that the JSON can't describe.
+                    print(f"[capture] read error: {e.message}; aborting", file=sys.stderr)
+                    metadata["error"] = {"code": e.code, "message": e.message}
+                    break
+                accum.append(iq)
+                accum_samples += iq.size
+                total_samples += iq.size
 
-    # Flush trailing partial chunk so no samples are dropped (skip if the
-    # writer died — would block forever on a dead consumer).
-    if accum_samples > 0 and not writer_died.is_set():
-        stitched = np.concatenate(accum) if len(accum) > 1 else accum[0]
-        file_idx += 1
-        chunk_queue.put((file_idx, stitched.copy()))
+                while accum_samples >= cfg.samples_per_file:
+                    if writer_died.is_set():
+                        print(
+                            f"[capture] writer thread died: {writer_error[0]}; aborting",
+                            file=sys.stderr,
+                        )
+                        metadata["error"] = {
+                            "code": 0,
+                            "message": f"writer thread died: {writer_error[0]}",
+                        }
+                        interrupted = True
+                        break
+                    stitched = np.concatenate(accum) if len(accum) > 1 else accum[0]
+                    file_idx += 1
+                    chunk = stitched[:cfg.samples_per_file].copy()
+                    remainder = stitched[cfg.samples_per_file:]
+                    try:
+                        chunk_queue.put_nowait((file_idx, chunk))
+                    except queue.Full:
+                        queue_full_count[0] += 1
+                        print(
+                            f"[capture] WARNING: writer queue full ({cfg.queue_max_chunks} "
+                            f"chunks pending); blocking read until disk catches up. "
+                            f"This may stress the USB pipeline.",
+                            file=sys.stderr, flush=True,
+                        )
+                        chunk_queue.put((file_idx, chunk))
+                    if remainder.size:
+                        accum = [remainder.copy()]
+                        accum_samples = int(remainder.size)
+                    else:
+                        accum = []
+                        accum_samples = 0
+        finally:
+            try:
+                sdr.stop_rx_sync()
+            except Exception:
+                pass
+            try:
+                sdr.close()
+            except Exception:
+                pass
+            # Best-effort restore default signal handlers so we don't
+            # leave the caller's process in an altered state.
+            if installed_handlers:
+                try:
+                    signal.signal(signal.SIGINT, signal.SIG_DFL)
+                    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+                except (ValueError, OSError):
+                    pass
 
-    # Signal writer to exit + wait for it to drain. If the writer is
-    # already dead, the poison is a no-op queue.put against the bounded
-    # queue (capped at QUEUE_MAX_CHUNKS); only blocks if the queue is
-    # full, which can't happen by construction since the writer's queue
-    # consumption was the only reason chunks were being removed — if it
-    # died at chunk N, queue size is at most N pending. Cap with a
-    # timeout for safety.
-    try:
-        chunk_queue.put(_POISON, timeout=5.0)
-    except queue.Full:
-        # Writer dead and queue stayed full; nothing we can do but proceed
-        # to record the failure in metadata.
-        pass
-    writer.join(timeout=10.0)
-    if writer.is_alive():
-        print(
-            "[capture] WARNING: writer thread did not join within 10 s; "
-            "metadata may be incomplete.",
-            file=sys.stderr,
+        # Flush trailing partial chunk so no samples are dropped (skip if the
+        # writer died — would block forever on a dead consumer).
+        if accum_samples > 0 and not writer_died.is_set():
+            stitched = np.concatenate(accum) if len(accum) > 1 else accum[0]
+            file_idx += 1
+            chunk_queue.put((file_idx, stitched.copy()))
+
+        try:
+            chunk_queue.put(_POISON, timeout=5.0)
+        except queue.Full:
+            pass
+        writer.join(timeout=10.0)
+        if writer.is_alive():
+            print(
+                "[capture] WARNING: writer thread did not join within 10 s; "
+                "metadata may be incomplete.",
+                file=sys.stderr,
+            )
+
+        metadata["hwtel"]["samples"] = hwtel.stop()
+        metadata["hwtel"]["summary"] = hwtel.summary()
+        metadata["files"] = files_record
+        metadata["writer"]["queue_full_blocks"] = queue_full_count[0]
+        metadata["fan_out"]["errors"] = fan_out_errors
+        metadata["finished_utc"] = _now_utc_iso()
+        metadata["actual_duration_s"] = time.monotonic() - t_start
+        metadata["total_samples"] = total_samples
+        metadata["ok"] = not interrupted and "error" not in metadata
+        meta_path.write_text(json.dumps(metadata, indent=2))
+
+        return CaptureResult(
+            ok=metadata["ok"],
+            metadata=metadata,
+            metadata_path=meta_path,
+            iq_paths=[out_dir / f["path"] for f in files_record],
+            total_samples=total_samples,
+            actual_duration_s=metadata["actual_duration_s"],
+            error=writer_error[0],
         )
 
-    metadata["hwtel"]["samples"] = hwtel.stop()
-    metadata["hwtel"]["summary"] = hwtel.summary()
-    metadata["files"] = files_record
-    metadata["writer"]["queue_full_blocks"] = queue_full_count[0]
-    metadata["finished_utc"] = _now_utc_iso()
-    metadata["actual_duration_s"] = time.monotonic() - t_start
-    metadata["total_samples"] = total_samples
-    metadata["ok"] = not interrupted and "error" not in metadata
-    meta_path.write_text(json.dumps(metadata, indent=2))
 
-    # Concise hwtel summary in the console output so the operator can spot
-    # thermal throttling at a glance without parsing the sidecar JSON.
+def run_capture(config: CaptureConfig) -> CaptureResult:
+    """Convenience wrapper: construct + run a CaptureSession."""
+    return CaptureSession(config).run()
+
+
+def _print_summary(result: CaptureResult, out_dir: Path) -> None:
+    """Console summary for the CLI path (operator-facing)."""
+    metadata = result.metadata
     hwtel_summary = metadata["hwtel"]["summary"]
     thermal_summary = " ".join(
         f"{zone}:{stats['min']:.0f}→{stats['max']:.0f}°C"
         for zone, stats in hwtel_summary.get("thermal_C", {}).items()
     )
+    fan_out_errors = metadata["fan_out"]["errors"]
+    fan_out_line = (
+        f"  fan_out errors: {len(fan_out_errors)}\n" if fan_out_errors else ""
+    )
     print(
-        f"\n[capture] wrote {len(files_record)} .iq files + 1 .json sidecar to {out_dir}\n"
-        f"  base={base}\n"
-        f"  total_samples={total_samples}   duration={metadata['actual_duration_s']:.2f} s\n"
-        f"  writer queue-full blocks={queue_full_count[0]}\n"
+        f"\n[capture] wrote {len(result.iq_paths)} .iq files + 1 .json sidecar to {out_dir}\n"
+        f"  base={metadata['base']}\n"
+        f"  total_samples={result.total_samples}   duration={result.actual_duration_s:.2f} s\n"
+        f"  writer queue-full blocks={metadata['writer']['queue_full_blocks']}\n"
+        f"{fan_out_line}"
         f"  hwtel thermal: {thermal_summary or '(no zones detected)'}",
         flush=True,
     )
-    return 0 if metadata["ok"] else 1
+
+
+def capture(args: argparse.Namespace) -> int:
+    """CLI shim: build a CaptureConfig from argparse and run the session."""
+    config = CaptureConfig(
+        freq_hz=args.freq,
+        rate_hz=args.rate,
+        duration_s=args.duration,
+        env=args.env,
+        antenna=args.antenna,
+        out_dir=args.out_dir,
+        lna_gain=args.lna_gain,
+        vga_gain=args.vga_gain,
+        hwtel_interval_s=args.hwtel_interval,
+    )
+    result = run_capture(config)
+    _print_summary(result, args.out_dir)
+    return 0 if result.ok else 1
 
 
 def main() -> int:
