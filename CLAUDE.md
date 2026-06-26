@@ -247,15 +247,15 @@ Otaman folder: `../watchtower-otaman/` (contains `.agents/`, `platform.yaml`, bu
   - watchtower-fusion (../watchtower-fusion) — owned by **fusion-agent** (READ-ONLY)
   - watchtower-specs (../watchtower-specs) — owned by **spec-agent** (READ-ONLY)
   - watchtower-synthetic (../watchtower-synthetic) — owned by **synthetic-agent** (READ-ONLY)
-  - watchtower-synthetic-ui (../watchtower-synthetic-ui) — owned by **synthetic-agent** (READ-ONLY)
   - watchtower-tactiq (../watchtower-tactiq) — owned by **tactiq-agent** (READ-ONLY)
   - watchtower-e2e (../watchtower-e2e) — owned by **e2e-agent** (READ-ONLY)
   - watchtower-train (../watchtower-train) — owned by **train-agent** (READ-ONLY)
-  - watchtower-features (../watchtower-features) — owned by **train-agent** (READ-ONLY)
   - watchtower-citadel (../watchtower-citadel) — owned by **citadel-agent** (READ-ONLY)
   - watchtower-grants (../watchtower-grants) — owned by **grants-agent** (READ-ONLY)
+  - watchtower-image-builds (../watchtower-image-builds) — owned by **image-build-agent** (READ-ONLY)
 - You may read other repos' source code, configs, and CLAUDE.md to understand their APIs
 - If you need a change in another repo, send a `task-assignment` or `question` message to its owner
+
 
 ### Communication — Bash CLI for hot path, MCP for richer ops
 
@@ -288,6 +288,46 @@ Why the split: bus checks happen dozens of times per session, and the MCP-via-in
 - When you change an API or shared type: send `contract-change` via `otaman_send` BEFORE committing
 - Message handling while busy: ack as `read`, add to queue, finish current task first
 - Urgent messages: pause current work, inform the human immediately
+
+### Outcome Proposals (business-impact ideas)
+
+When you spot a business-impact idea — a pricing change, a process change, a
+new outcome the program should pursue — send it as an **outcome-proposal**,
+not as `info`:
+
+```
+otaman send --type outcome-proposal --to human --subject "<short hook>"
+```
+
+Strategic agents (cofounder-agent, cpo-agent, and any others named in the
+project's `bus.routing_rules`) are auto-notified via CC — you do not list
+them manually. The primary delivery stays addressed to `human` for sign-off.
+
+- Use this type whenever your subject mentions business impact, a proposed
+  outcome, a market move, or a structural change to how the program is run.
+- Do **not** use `--type info` for outcome statements; they get lost in the
+  general bus noise and skip the strategic CC fan-out.
+- Implementation tasks, status updates, and routine FYIs stay on `info` /
+  `question` / `task-complete` as before.
+
+### Agent Status (REQUIRED)
+
+Before writing any code for a specific task, call:
+```
+otaman set-status working --task "<N.M task description>" --change <change-name>
+```
+
+When waiting on another agent or a dependency:
+```
+otaman set-status waiting --task "<N.M ...>" --change <change-name>
+```
+
+When done with all current tasks:
+```
+otaman set-status idle
+```
+
+This is a single CLI call — no file editing, no token overhead. It lets the human see live fleet state in `otaman status` and in `otaman check`. Per `agent-status-presence` design Q3.
 
 ### Task Queue
 - Your queue file: `../watchtower-otaman/.agents/queue/hardware-agent.md`
